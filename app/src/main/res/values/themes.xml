@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="genie_bg">#0E1117</color>
+    <style name="Theme.Genie" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/genie_bg</item>
+        <item name="android:statusBarColor">@color/genie_bg</item>
+        <item name="android:navigationBarColor">@color/genie_bg</item>
+    </style>
+</resources>
