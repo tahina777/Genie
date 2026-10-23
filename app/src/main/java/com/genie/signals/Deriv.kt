@@ -15,15 +15,29 @@ import kotlin.coroutines.resumeWithException
 
 /** Données de marché gratuites via l'API WebSocket publique de Deriv (forex + indices synthétiques). */
 object Deriv {
-    private const val URL = "wss://ws.derivws.com/websockets/v3?app_id=1089"
+    private const val URL_NEW = "wss://api.derivws.com/trading/v1/options/ws/public"
+    private const val URL_OLD = "wss://ws.derivws.com/websockets/v3?app_id=1089"
+
     private val client = OkHttpClient.Builder()
         .readTimeout(0, TimeUnit.MILLISECONDS)
         .build()
 
     suspend fun candles(code: String, granularity: Int, count: Int = 300): List<Candle> {
-        val result = withTimeoutOrNull(20_000) {
+        return try {
+            fetch(URL_NEW, code, granularity, count)
+        } catch (e1: IOException) {
+            try {
+                fetch(URL_OLD, code, granularity, count)
+            } catch (e2: IOException) {
+                throw IOException((e1.message ?: "?") + " / " + (e2.message ?: "?"))
+            }
+        }
+    }
+
+    private suspend fun fetch(url: String, code: String, granularity: Int, count: Int): List<Candle> {
+        val result = withTimeoutOrNull(15_000) {
             suspendCancellableCoroutine<List<Candle>> { cont ->
-                val req = Request.Builder().url(URL).build()
+                val req = Request.Builder().url(url).build()
                 val ws = client.newWebSocket(req, object : WebSocketListener() {
                     override fun onOpen(webSocket: WebSocket, response: Response) {
                         val q = JSONObject()
