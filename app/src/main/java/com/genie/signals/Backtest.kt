@@ -44,6 +44,7 @@ internal class Trade(
 
 /**
  * Backtest "pas à pas" : à chaque bougie, Genie ne voit que le passé, comme en direct.
+ * Le timeframe supérieur (tendance + niveaux) est lui aussi limité aux bougies déjà terminées.
  * Un trade gagne +1,5 R (TP1) ou perd -1 R (SL). Si SL et TP sont touchés dans la même
  * bougie, on compte la perte (hypothèse prudente). Sans résultat après 60 bougies,
  * le trade est clôturé au dernier prix. Spread et commissions ne sont pas inclus.
@@ -54,15 +55,32 @@ object Backtest {
     private const val START = 120
     private const val MAX_HOLD = 60
 
+    /** Même correspondance que Scanner.higherSeconds : à garder identique. */
+    private fun higherSeconds(s: Int): Int? = when {
+        s <= 300 -> 3600
+        s <= 900 -> 14400
+        s <= 3600 -> 14400
+        s <= 14400 -> 86400
+        else -> null
+    }
+
     suspend fun run(markets: List<Market>, tf: Tf): BtResult = coroutineScope {
         val failed = AtomicInteger(0)
         val gate = Semaphore(3)
+        val hs = higherSeconds(tf.seconds)
         val lists = markets.map { m ->
             async {
                 gate.withPermit {
                     try {
                         val candles = Deriv.candles(m.code, tf.seconds, 1000)
-                        withContext(Dispatchers.Default) { simulate(m, tf, candles) }
+                        val htf = if (hs == null) null else try {
+                            Deriv.candles(m.code, hs, 1000)
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            null
+                        }
+                        withContext(Dispatchers.Default) { simulate(m, tf, candles, htf, hs) }
                     } catch (e: CancellationException) {
                         throw e
                     } catch (e: Exception) {
@@ -123,7 +141,27 @@ object Backtest {
         else -> "Score 50 à 64"
     }
 
-    private fun simulate(m: Market, tf: Tf, c: List<Candle>): List<Trade> {
+    /**
+     * Bougies du timeframe supérieur déjà terminées à l'instant t, plus une copie de la dernière
+     * en fin de liste (le moteur ignore la dernière bougie, supposée en formation).
+     */
+    private fun htfSlice(htf: List<Candle>, hs: Int, t: Long): List<Candle>? {
+        var lo = 0
+        var hi = htf.size
+        while (lo < hi) {
+            val mid = (lo + hi) / 2
+            if (htf[mid].time + hs <= t) lo = mid + 1 else hi = mid
+        }
+        val n = lo
+        if (n < 2) return null
+        val from = max(0, n - WINDOW)
+        val out = ArrayList<Candle>(n - from + 1)
+        for (k in from until n) out.add(htf[k])
+        out.add(htf[n - 1])
+        return out
+    }
+
+    private fun simulate(m: Market, tf: Tf, c: List<Candle>, htf: List<Candle>?, hs: Int?): List<Trade> {
         val out = ArrayList<Trade>()
         val now = System.currentTimeMillis() / 1000
         var i = START
@@ -136,7 +174,8 @@ object Backtest {
                 val x = c[k]
                 slice.add(Candle(x.time + delta, x.open, x.high, x.low, x.close))
             }
-            val s = Engine.analyse(m, tf, slice)
+            val h = if (htf == null || hs == null) null else htfSlice(htf, hs, c[i + 1].time)
+            val s = Engine.analyse(m, tf, slice, h)
             if (s == null) {
                 i++
                 continue
