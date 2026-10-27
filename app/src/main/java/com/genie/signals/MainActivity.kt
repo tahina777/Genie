@@ -25,6 +25,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -56,16 +57,23 @@ class MainVm : ViewModel() {
     val loading = MutableStateFlow(false)
     val status = MutableStateFlow("Appuie sur « Scanner » pour analyser le marché.")
 
+    val btLoading = MutableStateFlow(false)
+    val btResult = MutableStateFlow<BtResult?>(null)
+    val btLabel = MutableStateFlow("")
+    val btStatus = MutableStateFlow("")
+
+    private fun marketList(): List<Market> = when (filter.value) {
+        1 -> ALL_MARKETS.filter { !it.synthetic }
+        2 -> ALL_MARKETS.filter { it.synthetic }
+        else -> ALL_MARKETS
+    }
+
     fun scan() {
-        if (loading.value) return
+        if (loading.value || btLoading.value) return
         viewModelScope.launch {
             loading.value = true
             status.value = "Analyse en cours…"
-            val list = when (filter.value) {
-                1 -> ALL_MARKETS.filter { !it.synthetic }
-                2 -> ALL_MARKETS.filter { it.synthetic }
-                else -> ALL_MARKETS
-            }
+            val list = marketList()
             try {
                 val res = Scanner.scan(list, tf.value)
                 signals.value = res.signals
@@ -77,6 +85,24 @@ class MainVm : ViewModel() {
                 status.value = "Erreur : vérifie ta connexion internet."
             }
             loading.value = false
+        }
+    }
+
+    fun backtest() {
+        if (loading.value || btLoading.value) return
+        viewModelScope.launch {
+            btLoading.value = true
+            btStatus.value = "Backtest en cours… (environ 1 minute)"
+            val list = marketList()
+            try {
+                val res = Backtest.run(list, tf.value)
+                btResult.value = res
+                btLabel.value = tf.value.label
+                btStatus.value = if (res.total.trades == 0) "Aucun trade trouvé sur l'historique." else ""
+            } catch (e: Exception) {
+                btStatus.value = "Erreur : vérifie ta connexion internet."
+            }
+            btLoading.value = false
         }
     }
 }
@@ -109,6 +135,10 @@ fun GenieApp(vm: MainVm) {
     val signals by vm.signals.collectAsState()
     val loading by vm.loading.collectAsState()
     val status by vm.status.collectAsState()
+    val btLoading by vm.btLoading.collectAsState()
+    val btResult by vm.btResult.collectAsState()
+    val btLabel by vm.btLabel.collectAsState()
+    val btStatus by vm.btStatus.collectAsState()
     var alerts by remember { mutableStateOf(Alerts.isOn(ctx)) }
 
     val permLauncher = rememberLauncherForActivityResult(
@@ -150,13 +180,23 @@ fun GenieApp(vm: MainVm) {
             }
             Button(
                 onClick = { vm.scan() },
-                enabled = !loading,
+                enabled = !loading && !btLoading,
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Text(if (loading) "Analyse en cours…" else "Scanner le marché")
             }
-            if (loading) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            OutlinedButton(
+                onClick = { vm.backtest() },
+                enabled = !loading && !btLoading,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(if (btLoading) "Backtest en cours…" else "Lancer le backtest")
+            }
+            if (loading || btLoading) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
             Text(status, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (btStatus.isNotEmpty()) {
+                Text(btStatus, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
 
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
@@ -187,6 +227,10 @@ fun GenieApp(vm: MainVm) {
                 modifier = Modifier.weight(1f),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
+                val bt = btResult
+                if (bt != null && bt.total.trades > 0) {
+                    item { BtCard(bt, btLabel) }
+                }
                 items(signals) { s -> SignalCard(s) }
                 item {
                     Text(
@@ -200,6 +244,82 @@ fun GenieApp(vm: MainVm) {
                 }
             }
         }
+    }
+}
+
+private fun num(x: Double, d: Int): String =
+    String.format(java.util.Locale.US, "%." + d + "f", x)
+
+private fun fmtR(x: Double): String = (if (x > 0) "+" else "") + num(x, 1) + " R"
+
+@Composable
+fun BtCard(r: BtResult, tfLabel: String) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Backtest · " + tfLabel, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+            var info = r.markets.toString() + " marchés testés"
+            if (r.failed > 0) info += " · " + r.failed + " indisponible(s)"
+            Text(info, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+
+            BtRow(r.total)
+
+            if (r.bySetup.isNotEmpty()) {
+                BtTitle("Par setup")
+                r.bySetup.forEach { BtRow(it) }
+            }
+            if (r.byScore.isNotEmpty()) {
+                BtTitle("Par score")
+                r.byScore.forEach { BtRow(it) }
+            }
+            if (r.byMarket.isNotEmpty()) {
+                BtTitle("Par marché")
+                r.byMarket.forEach { BtRow(it) }
+            }
+
+            Text(
+                "Résultats passés : ils ne garantissent pas les résultats futurs. " +
+                    "Spread et commissions non inclus. R = montant risqué par trade. " +
+                    "PF = profit factor, DD = drawdown maximum.",
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+@Composable
+private fun BtTitle(text: String) {
+    Text(
+        text,
+        fontWeight = FontWeight.Bold,
+        fontSize = 14.sp,
+        color = MaterialTheme.colorScheme.primary,
+        modifier = Modifier.padding(top = 6.dp)
+    )
+}
+
+@Composable
+private fun BtRow(g: BtGroup) {
+    val col = if (g.totalR >= 0) Color(0xFF26A69A) else Color(0xFFEF5350)
+    Column {
+        Row(Modifier.fillMaxWidth()) {
+            Text(
+                g.name,
+                modifier = Modifier.weight(1f),
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+            Text(fmtR(g.totalR), color = col, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+        }
+        Text(
+            g.trades.toString() + " trades · " + num(g.winRate, 0) + " % gagnants · R moy " +
+                num(g.avgR, 2) + " · PF " + num(g.profitFactor, 2) + " · DD " + num(g.maxDd, 1) + " R",
+            fontSize = 11.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
     }
 }
 
