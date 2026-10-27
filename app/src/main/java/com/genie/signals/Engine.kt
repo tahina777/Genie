@@ -18,7 +18,9 @@ object Engine {
         val target: Double?
     )
 
-    fun analyse(m: Market, tf: Tf, raw: List<Candle>): Signal? {
+    private class Level(val price: Double, val touches: Int)
+
+    fun analyse(m: Market, tf: Tf, raw: List<Candle>, htfRaw: List<Candle>? = null): Signal? {
         if (raw.size < 100) return null
         // On ignore la dernière bougie (encore en formation)
         val c = raw.dropLast(1)
@@ -42,13 +44,72 @@ object Engine {
             ?: (if (bh != null) fromBbma(bh, trend, atr, entry, c) else null)
             ?: return null
 
-        if (draft.score < MIN_SCORE) return null
-
         val risk = abs(entry - draft.sl)
         val sign = if (draft.dir == Direction.BUY) 1.0 else -1.0
+        var score = draft.score
+        val reasons = draft.reasons.toMutableList()
+        var target = draft.target
+
+        // Multi-timeframe + support/résistance du timeframe supérieur
+        if (htfRaw != null && htfRaw.size >= 100) {
+            val h = htfRaw.dropLast(1)
+            val atrH = Ind.atr(h)
+            if (atrH > 0.0) {
+                val wanted = if (draft.dir == Direction.BUY) 1 else -1
+                val ht = BbmaCalc(h).trend()
+                if (ht == wanted) {
+                    score += 10
+                    reasons.add("Tendance du timeframe supérieur dans le même sens (+10)")
+                } else if (ht == -wanted) {
+                    score -= 20
+                    reasons.add("Attention : tendance du timeframe supérieur à contre-courant (-20)")
+                }
+
+                val lv = levels(h, atrH)
+
+                // Rebond sur un niveau dans le bon sens
+                val bounce = lv.any {
+                    if (draft.dir == Direction.BUY)
+                        it.price <= entry + 0.2 * atrH && entry - it.price <= 0.75 * atrH
+                    else
+                        it.price >= entry - 0.2 * atrH && it.price - entry <= 0.75 * atrH
+                }
+                if (bounce) {
+                    score += 10
+                    reasons.add(
+                        if (draft.dir == Direction.BUY) "Entrée sur un support du timeframe supérieur (+10)"
+                        else "Entrée sur une résistance du timeframe supérieur (+10)"
+                    )
+                }
+
+                // Niveau opposé qui bloque le chemin vers TP1
+                val blocked = lv.any {
+                    val d = (it.price - entry) * sign
+                    d > 0.2 * atrH && d < 1.5 * risk
+                }
+                if (blocked) {
+                    score -= 10
+                    reasons.add("Niveau du timeframe supérieur proche avant TP1 (-10)")
+                }
+
+                // Niveau suivant = cible TP2 (si le setup n'a pas déjà une cible)
+                if (target == null) {
+                    val ahead = lv
+                        .filter { (it.price - entry) * sign >= 2.0 * risk }
+                        .minByOrNull { abs(it.price - entry) }
+                    if (ahead != null) {
+                        target = ahead.price
+                        reasons.add("TP2 placé sur le prochain niveau du timeframe supérieur")
+                    }
+                }
+            }
+        }
+
+        if (score < MIN_SCORE) return null
+
         val tp1 = entry + sign * 1.5 * risk
         var tp2 = entry + sign * 2.5 * risk
-        val t = draft.target
+        val t = target
         if (t != null && abs(t - entry) >= 2.0 * risk && (t - entry) * sign > 0) {
             tp2 = if (draft.dir == Direction.BUY) max(tp2, t) else min(tp2, t)
         }
@@ -62,10 +123,40 @@ object Engine {
             sl = draft.sl,
             tp1 = tp1,
             tp2 = tp2,
-            score = min(draft.score, 100),
-            reasons = draft.reasons,
+            score = min(score, 100),
+            reasons = reasons,
             time = last.time
         )
+    }
+
+    /** Points hauts/bas respectés au moins 2 fois, regroupés par proximité. */
+    private fun levels(h: List<Candle>, atrH: Double): List<Level> {
+        val n = 5
+        val pts = mutableListOf<Double>()
+        for (i in n until h.size - n) {
+            var isHigh = true
+            var isLow = true
+            for (k in 1..n) {
+                if (h[i].high <= h[i - k].high || h[i].high <= h[i + k].high) isHigh = false
+                if (h[i].low >= h[i - k].low || h[i].low >= h[i + k].low) isLow = false
+            }
+            if (isHigh) pts.add(h[i].high)
+            if (isLow) pts.add(h[i].low)
+        }
+        pts.sort()
+
+        val out = mutableListOf<Level>()
+        var group = mutableListOf<Double>()
+        fun flush() {
+            if (group.size >= 2) out.add(Level(group.average(), group.size))
+            group = mutableListOf()
+        }
+        for (p in pts) {
+            if (group.isNotEmpty() && p - group.last() > 0.3 * atrH) flush()
+            group.add(p)
+        }
+        flush()
+        return out
     }
 
     private fun fromSmc(smc: SmcHit, bh: BbmaHit?, sd: SdHit?, trend: Int, atr: Double, entry: Double): Draft? {
