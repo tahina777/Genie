@@ -76,7 +76,7 @@ object Backtest {
         val all = lists.flatten()
         val total = group("Tous les signaux", all)
 
-        val families = listOf("SMC + BBMA (confluence)", "SMC seul", "BBMA MHV", "BBMA Reentry")
+        val families = listOf("SMC + BBMA (confluence)", "SMC seul", "BBMA MHV", "BBMA Reentry", "Supply & Demand")
         val bySetup = families
             .map { f -> group(f, all.filter { it.family == f }) }
             .filter { it.trades > 0 }
