@@ -4,7 +4,7 @@ import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 
-/** Combine SMC et BBMA et produit un signal avec entrée, SL, TP et score. */
+/** Combine SMC, BBMA et Supply & Demand et produit un signal avec entrée, SL, TP et score. */
 object Engine {
 
     private const val MIN_SCORE = 50
@@ -23,7 +23,6 @@ object Engine {
         // On ignore la dernière bougie (encore en formation)
         val c = raw.dropLast(1)
         val last = c.last()
-
         // Marché fermé (forex le week-end) : bougies trop anciennes
         val now = System.currentTimeMillis() / 1000
         if (now - last.time > tf.seconds * 4L) return null
@@ -34,10 +33,12 @@ object Engine {
         val bbma = BbmaCalc(c)
         val bh = bbma.detect()
         val smc = SmcCalc(c).detect()
+        val sd = SdCalc(c).detect(atr)
         val trend = bbma.trend()
         val entry = last.close
 
-        val draft = (if (smc != null) fromSmc(smc, bh, trend, atr, entry) else null)
+        val draft = (if (smc != null) fromSmc(smc, bh, sd, trend, atr, entry) else null)
+            ?: (if (sd != null) fromSd(sd, bh, trend, atr, entry) else null)
             ?: (if (bh != null) fromBbma(bh, trend, atr, entry, c) else null)
             ?: return null
 
@@ -67,7 +68,7 @@ object Engine {
         )
     }
 
-    private fun fromSmc(smc: SmcHit, bh: BbmaHit?, trend: Int, atr: Double, entry: Double): Draft? {
+    private fun fromSmc(smc: SmcHit, bh: BbmaHit?, sd: SdHit?, trend: Int, atr: Double, entry: Double): Draft? {
         val z = smc.zone
         var sl = if (smc.dir == Direction.BUY) z.low - 0.3 * atr else z.high + 0.3 * atr
         var risk = abs(entry - sl)
@@ -82,7 +83,6 @@ object Engine {
         reasons.addAll(smc.reasons)
         score += if (smc.kind == "CHoCH") 15 else 8
         if (smc.sweep) score += 10
-
         val wanted = if (smc.dir == Direction.BUY) 1 else -1
         if (trend == wanted) {
             score += 5
@@ -98,9 +98,48 @@ object Engine {
                 reasons.add("Attention : BBMA indique la direction opposée")
             }
         }
-
+        if (sd != null) {
+            if (sd.dir == smc.dir) {
+                score += 15
+                reasons.addAll(sd.reasons)
+                reasons.add("Confluence SMC + Supply & Demand")
+            } else {
+                score -= 10
+                reasons.add("Attention : zone Supply & Demand de direction opposée")
+            }
+        }
         val setup = "SMC " + smc.kind + " + " + smc.zoneType + (if (bh != null && bh.dir == smc.dir) " + " + bh.setup else "")
         return Draft(smc.dir, sl, score, setup, reasons, smc.target)
+    }
+
+    private fun fromSd(sd: SdHit, bh: BbmaHit?, trend: Int, atr: Double, entry: Double): Draft? {
+        var sl = if (sd.dir == Direction.BUY) sd.low - 0.3 * atr else sd.high + 0.3 * atr
+        var risk = abs(entry - sl)
+        if (risk > 4 * atr) return null
+        if (risk < 0.5 * atr) {
+            sl = if (sd.dir == Direction.BUY) entry - 0.5 * atr else entry + 0.5 * atr
+            risk = 0.5 * atr
+        }
+
+        var score = 45 + min(15, max(0, ((sd.strength - 1.5) * 6).toInt()))
+        val reasons = mutableListOf<String>()
+        reasons.addAll(sd.reasons)
+        val wanted = if (sd.dir == Direction.BUY) 1 else -1
+        if (trend == wanted) {
+            score += 5
+            reasons.add("EMA50 dans le sens du signal")
+        }
+        if (bh != null) {
+            if (bh.dir == sd.dir) {
+                score += 20
+                reasons.addAll(bh.reasons)
+                reasons.add("Confluence Supply & Demand + BBMA")
+            } else {
+                score -= 15
+                reasons.add("Attention : BBMA indique la direction opposée")
+            }
+        }
+        return Draft(sd.dir, sl, score, "Supply & Demand", reasons, null)
     }
 
     private fun fromBbma(bh: BbmaHit, trend: Int, atr: Double, entry: Double, c: List<Candle>): Draft? {
