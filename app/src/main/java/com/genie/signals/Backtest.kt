@@ -12,7 +12,15 @@ import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.abs
 import kotlin.math.max
 
-data class BtGroup(val name: String, val trades: Int, val wins: Int, val avgR: Double) {
+data class BtGroup(
+    val name: String,
+    val trades: Int,
+    val wins: Int,
+    val avgR: Double,
+    val totalR: Double = 0.0,
+    val profitFactor: Double = 0.0,
+    val maxDd: Double = 0.0
+) {
     val winRate: Double
         get() = if (trades == 0) 0.0 else wins * 100.0 / trades
 }
@@ -22,10 +30,17 @@ data class BtResult(
     val bySetup: List<BtGroup>,
     val byScore: List<BtGroup>,
     val markets: Int,
-    val failed: Int
+    val failed: Int,
+    val byMarket: List<BtGroup> = emptyList()
 )
 
-internal class Trade(val family: String, val bucket: String, val r: Double)
+internal class Trade(
+    val family: String,
+    val bucket: String,
+    val r: Double,
+    val market: String = "",
+    val time: Long = 0L
+)
 
 /**
  * Backtest "pas à pas" : à chaque bougie, Genie ne voit que le passé, comme en direct.
@@ -34,6 +49,7 @@ internal class Trade(val family: String, val bucket: String, val r: Double)
  * le trade est clôturé au dernier prix. Spread et commissions ne sont pas inclus.
  */
 object Backtest {
+
     private const val WINDOW = 300
     private const val START = 120
     private const val MAX_HOLD = 60
@@ -56,24 +72,43 @@ object Backtest {
                 }
             }
         }.awaitAll()
-        val all = lists.flatten()
 
+        val all = lists.flatten()
         val total = group("Tous les signaux", all)
+
         val families = listOf("SMC + BBMA (confluence)", "SMC seul", "BBMA MHV", "BBMA Reentry")
         val bySetup = families
             .map { f -> group(f, all.filter { it.family == f }) }
             .filter { it.trades > 0 }
+
         val buckets = listOf("Score 80 et plus", "Score 65 à 79", "Score 50 à 64")
         val byScore = buckets
             .map { b -> group(b, all.filter { it.bucket == b }) }
             .filter { it.trades > 0 }
-        BtResult(total, bySetup, byScore, markets.size, failed.get())
+
+        val byMarket = all.groupBy { it.market }
+            .map { (k, v) -> group(k, v) }
+            .sortedByDescending { it.totalR }
+
+        BtResult(total, bySetup, byScore, markets.size, failed.get(), byMarket)
     }
 
     private fun group(name: String, t: List<Trade>): BtGroup {
         val wins = t.count { it.r > 0 }
-        val avg = if (t.isEmpty()) 0.0 else t.sumOf { it.r } / t.size
-        return BtGroup(name, t.size, wins, avg)
+        val sum = t.sumOf { it.r }
+        val avg = if (t.isEmpty()) 0.0 else sum / t.size
+        val gain = t.filter { it.r > 0 }.sumOf { it.r }
+        val loss = -t.filter { it.r < 0 }.sumOf { it.r }
+        val pf = if (loss == 0.0) (if (gain > 0) 99.0 else 0.0) else gain / loss
+        var eq = 0.0
+        var peak = 0.0
+        var dd = 0.0
+        for (x in t.sortedBy { it.time }) {
+            eq += x.r
+            if (eq > peak) peak = eq
+            if (peak - eq > dd) dd = peak - eq
+        }
+        return BtGroup(name, t.size, wins, avg, sum, pf, dd)
     }
 
     private fun family(setup: String): String = when {
@@ -136,7 +171,7 @@ object Backtest {
                 val sign = if (buy) 1.0 else -1.0
                 r = (c[end].close - s.entry) * sign / risk
             }
-            out.add(Trade(family(s.setup), bucket(s.score), r))
+            out.add(Trade(family(s.setup), bucket(s.score), r, m.code, c[i].time))
             i = end + 1
         }
         return out
