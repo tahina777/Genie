@@ -39,31 +39,47 @@ object Journal {
     private const val KEY = "entries"
     private const val MAX_ENTRIES = 300
     private const val MAX_HOLD = 60
+    private const val COOLDOWN = 8
     const val MIN_SCORE = 65
     private val lock = Any()
 
     fun all(ctx: Context): List<JEntry> = synchronized(lock) { load(ctx) }
 
-    fun add(ctx: Context, signals: List<Signal>) {
+    /**
+     * Enregistre les nouveaux signaux et renvoie ceux qui ont vraiment été ajoutés.
+     * Un signal du même marché, timeframe et direction est ignoré tant que le précédent
+     * est en cours (60 bougies max) ou date de moins de 8 bougies.
+     */
+    fun add(ctx: Context, signals: List<Signal>): List<Signal> {
+        val added = ArrayList<Signal>()
         synchronized(lock) {
             val list = load(ctx).toMutableList()
-            val ids = list.map { it.id }.toHashSet()
-            var changed = false
             for (s in signals) {
                 if (s.score < MIN_SCORE) continue
                 val id = s.market.code + "|" + s.tf.label + "|" + s.dir + "|" + s.time
-                if (!ids.add(id)) continue
+                val buy = s.dir == Direction.BUY
+                val dup = list.any {
+                    it.id == id || (
+                        it.code == s.market.code &&
+                            it.tfSeconds == s.tf.seconds &&
+                            it.buy == buy &&
+                            abs(s.time - it.time) <
+                            s.tf.seconds.toLong() * (if (it.closed) COOLDOWN else MAX_HOLD)
+                        )
+                }
+                if (dup) continue
                 list.add(
                     JEntry(
                         id, s.market.name, s.market.code, s.tf.label, s.tf.seconds,
-                        s.dir == Direction.BUY, s.setup, s.score, s.entry, s.sl, s.tp1,
+                        buy, s.setup, s.score, s.entry, s.sl, s.tp1,
                         s.time, s.market.decimals, "open", 0.0
                     )
                 )
-                changed = true
+                added.add(s)
             }
-            if (changed) save(ctx, list)
+            if (added.isNotEmpty()) save(ctx, list)
         }
+        return added
     }
 
     suspend fun refresh(ctx: Context) {
