@@ -16,6 +16,7 @@ import androidx.work.NetworkType
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
+import kotlinx.coroutines.CancellationException
 import java.util.concurrent.TimeUnit
 
 object Alerts {
@@ -57,32 +58,68 @@ object Alerts {
         val sens = if (s.dir == Direction.BUY) "ACHAT" else "VENTE"
         val text = "Entrée " + s.fmt(s.entry) + " · SL " + s.fmt(s.sl) + " · TP " + s.fmt(s.tp1) +
             " · Score " + s.score
+        val lot = LotCalc.describe(s, LotCalc.capital(ctx), LotCalc.riskPct(ctx))
+        val big = s.setup + "\n" + text + (if (lot.isNotEmpty()) "\n" + lot else "")
         val n = NotificationCompat.Builder(ctx, channelId)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentTitle(sens + " " + s.market.name + " (" + s.tf.label + ")")
             .setContentText(text)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(s.setup + "\n" + text))
+            .setStyle(NotificationCompat.BigTextStyle().bigText(big))
             .setAutoCancel(true)
             .build()
-        NotificationManagerCompat.from(ctx).notify((s.market.code + s.time).hashCode(), n)
+        NotificationManagerCompat.from(ctx).notify((s.market.code + s.tf.label + s.time).hashCode(), n)
     }
 }
 
 class ScanWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, params) {
+
+    private val frames = listOf(Tf.M5, Tf.M15, Tf.H1, Tf.H4, Tf.D1)
+
+    /** Délai minimum (secondes) entre deux analyses d'un timeframe, pour économiser la batterie. */
+    private fun every(tf: Tf): Long = when (tf) {
+        Tf.M5, Tf.M15 -> 0L
+        Tf.H1 -> 1800L
+        Tf.H4 -> 3600L
+        Tf.D1 -> 14400L
+    }
+
+    private fun minScore(tf: Tf): Int = if (tf == Tf.M5) 80 else 70
+
     override suspend fun doWork(): Result {
-        return try {
-            val res = Scanner.scan(ALL_MARKETS, Tf.M15)
-            val prefs = applicationContext.getSharedPreferences("genie", Context.MODE_PRIVATE)
-            val seen = (prefs.getStringSet("seen", emptySet()) ?: emptySet()).toMutableSet()
-            for (s in res.signals) {
-                if (s.score < 70) continue
-                val key = s.market.code + "|" + s.tf.label + "|" + s.dir + "|" + s.time
-                if (seen.add(key)) Alerts.notify(applicationContext, s)
+        val ctx = applicationContext
+        val prefs = ctx.getSharedPreferences("genie", Context.MODE_PRIVATE)
+        val seen = (prefs.getStringSet("seen", emptySet()) ?: emptySet()).toMutableSet()
+        val now = System.currentTimeMillis() / 1000
+        var tried = 0
+        var ok = 0
+        for (tf in frames) {
+            val last = prefs.getLong("last_" + tf.label, 0L)
+            if (now - last < every(tf)) continue
+            tried++
+            try {
+                val res = Scanner.scan(ALL_MARKETS, tf)
+                Journal.add(ctx, res.signals)
+                for (s in res.signals) {
+                    if (s.score < minScore(tf)) continue
+                    val key = s.market.code + "|" + s.tf.label + "|" + s.dir + "|" + s.time
+                    if (seen.add(key)) Alerts.notify(ctx, s)
+                }
+                prefs.edit().putLong("last_" + tf.label, now).apply()
+                ok++
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // on passe au timeframe suivant
             }
-            prefs.edit().putStringSet("seen", seen.toList().takeLast(200).toSet()).apply()
-            Result.success()
-        } catch (e: Exception) {
-            Result.retry()
         }
+        prefs.edit().putStringSet("seen", seen.toList().takeLast(300).toSet()).apply()
+        try {
+            Journal.refresh(ctx)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // le journal sera mis à jour au prochain passage
+        }
+        return if (tried > 0 && ok == 0) Result.retry() else Result.success()
     }
 }
