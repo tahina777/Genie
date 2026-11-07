@@ -1,6 +1,7 @@
 package com.genie.signals
 
 import android.Manifest
+import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -10,14 +11,18 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -26,12 +31,14 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -42,6 +49,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
@@ -49,6 +57,9 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 class MainVm : ViewModel() {
     val tf = MutableStateFlow(Tf.M15)
@@ -62,14 +73,18 @@ class MainVm : ViewModel() {
     val btLabel = MutableStateFlow("")
     val btStatus = MutableStateFlow("")
 
+    val journal = MutableStateFlow<List<JEntry>>(emptyList())
+    val jLoading = MutableStateFlow(false)
+
     private fun marketList(): List<Market> = when (filter.value) {
         1 -> ALL_MARKETS.filter { !it.synthetic }
         2 -> ALL_MARKETS.filter { it.synthetic }
         else -> ALL_MARKETS
     }
 
-    fun scan() {
+    fun scan(ctx: Context) {
         if (loading.value || btLoading.value) return
+        val app = ctx.applicationContext
         viewModelScope.launch {
             loading.value = true
             status.value = "Analyse en cours…"
@@ -77,6 +92,7 @@ class MainVm : ViewModel() {
             try {
                 val res = Scanner.scan(list, tf.value)
                 signals.value = res.signals
+                Journal.add(app, res.signals)
                 var msg = res.analysed.toString() + " marchés analysés · " + res.signals.size + " signal(s)"
                 if (res.failed > 0) msg += " · " + res.failed + " indisponible(s)"
                 if (res.signals.isEmpty()) msg += "\nAucun setup valide pour le moment : c'est normal, patiente."
@@ -105,6 +121,30 @@ class MainVm : ViewModel() {
             btLoading.value = false
         }
     }
+
+    fun loadJournal(ctx: Context) {
+        journal.value = Journal.all(ctx.applicationContext).sortedByDescending { it.time }
+    }
+
+    fun refreshJournal(ctx: Context) {
+        if (jLoading.value) return
+        val app = ctx.applicationContext
+        viewModelScope.launch {
+            jLoading.value = true
+            try {
+                Journal.refresh(app)
+            } catch (e: Exception) {
+                // on garde l'ancien état
+            }
+            journal.value = Journal.all(app).sortedByDescending { it.time }
+            jLoading.value = false
+        }
+    }
+
+    fun clearJournal(ctx: Context) {
+        Journal.clear(ctx.applicationContext)
+        journal.value = emptyList()
+    }
 }
 
 class MainActivity : ComponentActivity() {
@@ -126,6 +166,11 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+private fun numText(v: Double): String =
+    if (v == Math.floor(v)) v.toLong().toString() else v.toString()
+
+private fun parseNum(s: String): Double = s.replace(',', '.').toDoubleOrNull() ?: 0.0
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun GenieApp(vm: MainVm) {
@@ -139,7 +184,18 @@ fun GenieApp(vm: MainVm) {
     val btResult by vm.btResult.collectAsState()
     val btLabel by vm.btLabel.collectAsState()
     val btStatus by vm.btStatus.collectAsState()
+    val journal by vm.journal.collectAsState()
+    val jLoading by vm.jLoading.collectAsState()
     var alerts by remember { mutableStateOf(Alerts.isOn(ctx)) }
+    var screen by remember { mutableStateOf(0) }
+    var capText by remember {
+        mutableStateOf(LotCalc.capital(ctx).let { if (it > 0) numText(it) else "" })
+    }
+    var riskText by remember { mutableStateOf(numText(LotCalc.riskPct(ctx))) }
+    val capital = parseNum(capText)
+    val riskPct = parseNum(riskText)
+
+    LaunchedEffect(Unit) { vm.loadJournal(ctx) }
 
     val permLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -161,94 +217,245 @@ fun GenieApp(vm: MainVm) {
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Tf.values().forEach { t ->
+                listOf("Scanner", "Journal").forEachIndexed { idx, label ->
                     FilterChip(
-                        selected = t == tf,
-                        onClick = { vm.tf.value = t },
-                        label = { Text(t.label) }
-                    )
-                }
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                listOf("Tous", "Forex", "Synthétiques").forEachIndexed { idx, label ->
-                    FilterChip(
-                        selected = idx == filter,
-                        onClick = { vm.filter.value = idx },
+                        selected = idx == screen,
+                        onClick = {
+                            screen = idx
+                            if (idx == 1) vm.loadJournal(ctx)
+                        },
                         label = { Text(label) }
                     )
                 }
             }
-            Button(
-                onClick = { vm.scan() },
-                enabled = !loading && !btLoading,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text(if (loading) "Analyse en cours…" else "Scanner le marché")
-            }
-            OutlinedButton(
-                onClick = { vm.backtest() },
-                enabled = !loading && !btLoading,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text(if (btLoading) "Backtest en cours…" else "Lancer le backtest")
-            }
-            if (loading || btLoading) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-            Text(status, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            if (btStatus.isNotEmpty()) {
-                Text(btStatus, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
 
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    "Alertes en arrière-plan (M15, score ≥ 70)",
-                    fontSize = 13.sp,
-                    modifier = Modifier.weight(1f)
-                )
-                Switch(
-                    checked = alerts,
-                    onCheckedChange = { on ->
-                        if (!on) {
-                            Alerts.disable(ctx)
-                            alerts = false
-                        } else if (Build.VERSION.SDK_INT >= 33 &&
-                            ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS)
-                            != PackageManager.PERMISSION_GRANTED
-                        ) {
-                            permLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                        } else {
-                            Alerts.enable(ctx)
-                            alerts = true
-                        }
+            if (screen == 0) {
+                Row(
+                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Tf.values().forEach { t ->
+                        FilterChip(
+                            selected = t == tf,
+                            onClick = { vm.tf.value = t },
+                            label = { Text(t.label) }
+                        )
                     }
-                )
-            }
-
-            LazyColumn(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                val bt = btResult
-                if (bt != null && bt.total.trades > 0) {
-                    item { BtCard(bt, btLabel) }
                 }
-                items(signals) { s -> SignalCard(s) }
-                item {
-                    Text(
-                        "Genie fournit des signaux indicatifs issus d'une analyse automatique. " +
-                            "Ce n'est pas un conseil financier et aucun gain n'est garanti. " +
-                            "Teste d'abord en compte démo et ne risque jamais plus de 1 % de ton capital par trade.",
-                        fontSize = 11.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(vertical = 12.dp)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("Tous", "Forex", "Synthétiques").forEachIndexed { idx, label ->
+                        FilterChip(
+                            selected = idx == filter,
+                            onClick = { vm.filter.value = idx },
+                            label = { Text(label) }
+                        )
+                    }
+                }
+                Button(
+                    onClick = { vm.scan(ctx) },
+                    enabled = !loading && !btLoading,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(if (loading) "Analyse en cours…" else "Scanner le marché")
+                }
+                OutlinedButton(
+                    onClick = { vm.backtest() },
+                    enabled = !loading && !btLoading,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(if (btLoading) "Backtest en cours…" else "Lancer le backtest")
+                }
+                if (loading || btLoading) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                Text(status, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (btStatus.isNotEmpty()) {
+                    Text(btStatus, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = capText,
+                        onValueChange = {
+                            capText = it
+                            LotCalc.save(ctx, parseNum(it), riskPct)
+                        },
+                        label = { Text("Capital ($)") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        modifier = Modifier.weight(1f)
+                    )
+                    OutlinedTextField(
+                        value = riskText,
+                        onValueChange = {
+                            riskText = it
+                            LotCalc.save(ctx, capital, parseNum(it))
+                        },
+                        label = { Text("Risque (%)") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        modifier = Modifier.weight(1f)
                     )
                 }
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "Alertes en arrière-plan (M5 à D1, score ≥ 70)",
+                        fontSize = 13.sp,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Switch(
+                        checked = alerts,
+                        onCheckedChange = { on ->
+                            if (!on) {
+                                Alerts.disable(ctx)
+                                alerts = false
+                            } else if (Build.VERSION.SDK_INT >= 33 &&
+                                ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS)
+                                != PackageManager.PERMISSION_GRANTED
+                            ) {
+                                permLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                            } else {
+                                Alerts.enable(ctx)
+                                alerts = true
+                            }
+                        }
+                    )
+                }
+
+                LazyColumn(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    val bt = btResult
+                    if (bt != null && bt.total.trades > 0) {
+                        item { BtCard(bt, btLabel) }
+                    }
+                    items(signals) { s -> SignalCard(s, LotCalc.describe(s, capital, riskPct)) }
+                    item {
+                        Text(
+                            "Genie fournit des signaux indicatifs issus d'une analyse automatique. " +
+                                "Ce n'est pas un conseil financier et aucun gain n'est garanti. " +
+                                "Teste d'abord en compte démo et ne risque jamais plus de 1 % de ton capital par trade.",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(vertical = 12.dp)
+                        )
+                    }
+                }
+            } else {
+                JournalScreen(
+                    entries = journal,
+                    loading = jLoading,
+                    onRefresh = { vm.refreshJournal(ctx) },
+                    onClear = { vm.clearJournal(ctx) }
+                )
             }
         }
     }
 }
 
+@Composable
+fun ColumnScope.JournalScreen(
+    entries: List<JEntry>,
+    loading: Boolean,
+    onRefresh: () -> Unit,
+    onClear: () -> Unit
+) {
+    val st = Journal.stats(entries)
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Button(onClick = onRefresh, enabled = !loading, modifier = Modifier.weight(1f)) {
+            Text(if (loading) "Mise à jour…" else "Actualiser les résultats")
+        }
+        OutlinedButton(onClick = onClear, enabled = !loading && entries.isNotEmpty()) {
+            Text("Effacer")
+        }
+    }
+    if (loading) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text("Résultats réels des signaux", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+            Text(
+                st.closed.toString() + " terminés · " + num(st.winRate, 0) + " % gagnants",
+                fontSize = 13.sp
+            )
+            Text(
+                "R total " + fmtR(st.totalR) + " · R moyen " + num(st.avgR, 2),
+                fontSize = 13.sp
+            )
+            Text(st.open.toString() + " en cours", fontSize = 13.sp)
+            Text(
+                "Signaux de score 65 et plus. TP1 = +1,5 R, SL = −1 R. " +
+                    "Spread et commissions non inclus.",
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+    LazyColumn(
+        modifier = Modifier.weight(1f),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        if (entries.isEmpty()) {
+            item {
+                Text(
+                    "Aucun signal enregistré pour l'instant. Lance un scan ou active les alertes.",
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+        items(entries) { e -> JournalRow(e) }
+    }
+}
+
+private fun statusLook(e: JEntry): Pair<String, Color> {
+    val green = Color(0xFF26A69A)
+    val red = Color(0xFFEF5350)
+    return when (e.status) {
+        "tp" -> Pair("TP1 " + fmtR(e.r), green)
+        "sl" -> Pair("SL " + fmtR(e.r), red)
+        "expired" -> Pair("Clôturé " + fmtR(e.r), if (e.r >= 0) green else red)
+        "unknown" -> Pair("Non vérifiable", Color.Gray)
+        else -> Pair("En cours", Color(0xFFFFB74D))
+    }
+}
+
+@Composable
+private fun JournalRow(e: JEntry) {
+    val look = statusLook(e)
+    val date = SimpleDateFormat("dd/MM HH:mm", Locale.getDefault()).format(Date(e.time * 1000))
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    e.market + " · " + e.tf + " · " + (if (e.buy) "ACHAT" else "VENTE"),
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 14.sp,
+                    modifier = Modifier.weight(1f)
+                )
+                Text(look.first, color = look.second, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+            }
+            Text(
+                e.setup + " · score " + e.score,
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Text(
+                "Entrée " + e.fmt(e.entry) + " · SL " + e.fmt(e.sl) + " · TP1 " + e.fmt(e.tp1),
+                fontSize = 12.sp
+            )
+            Text(date, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
 private fun num(x: Double, d: Int): String =
-    String.format(java.util.Locale.US, "%." + d + "f", x)
+    String.format(Locale.US, "%." + d + "f", x)
 
 private fun fmtR(x: Double): String = (if (x > 0) "+" else "") + num(x, 1) + " R"
 
@@ -324,7 +531,7 @@ private fun BtRow(g: BtGroup) {
 }
 
 @Composable
-fun SignalCard(s: Signal) {
+fun SignalCard(s: Signal, lot: String) {
     val col = if (s.dir == Direction.BUY) Color(0xFF26A69A) else Color(0xFFEF5350)
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -356,6 +563,14 @@ fun SignalCard(s: Signal) {
             LevelRow("Stop Loss", s.fmt(s.sl), Color(0xFFEF5350))
             LevelRow("Take Profit 1", s.fmt(s.tp1), Color(0xFF26A69A))
             LevelRow("Take Profit 2", s.fmt(s.tp2), Color(0xFF26A69A))
+            if (lot.isNotEmpty()) {
+                Text(
+                    lot,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
             LinearProgressIndicator(
                 progress = { s.score / 100f },
                 modifier = Modifier.fillMaxWidth()
