@@ -114,7 +114,8 @@ class ScanWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
         }
         prefs.edit().putStringSet("seen", seen.toList().takeLast(300).toSet()).apply()
         try {
-            Journal.refresh(ctx)
+                        val fresh = Journal.add(ctx, res.signals)
+                for (s in fresh) {
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
