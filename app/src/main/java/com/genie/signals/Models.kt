@@ -16,7 +16,8 @@ enum class Tf(val label: String, val seconds: Int) {
     M5("M5", 300),
     M15("M15", 900),
     H1("H1", 3600),
-    H4("H4", 14400)
+        H4("H4", 14400),
+    D1("D1", 86400)
 }
 
 data class Market(
