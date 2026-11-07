@@ -98,8 +98,8 @@ class ScanWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             tried++
             try {
                 val res = Scanner.scan(ALL_MARKETS, tf)
-                Journal.add(ctx, res.signals)
-                for (s in res.signals) {
+                val fresh = Journal.add(ctx, res.signals)
+                for (s in fresh) {
                     if (s.score < minScore(tf)) continue
                     val key = s.market.code + "|" + s.tf.label + "|" + s.dir + "|" + s.time
                     if (seen.add(key)) Alerts.notify(ctx, s)
@@ -114,8 +114,7 @@ class ScanWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
         }
         prefs.edit().putStringSet("seen", seen.toList().takeLast(300).toSet()).apply()
         try {
-                        val fresh = Journal.add(ctx, res.signals)
-                for (s in fresh) {
+            Journal.refresh(ctx)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
