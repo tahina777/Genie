@@ -1,12 +1,21 @@
 package com.genie.signals
 
 import kotlin.math.max
+import kotlin.math.min
 
 data class BbmaHit(
     val setup: String,
     val dir: Direction,
     val extremeIdx: Int,
     val reasons: List<String>
+)
+
+/** Repères BBMA du moment : Extrême le plus récent et type de la dernière bougie. */
+data class BbmaMarks(
+    val extreme: Direction?,    // SELL = extrême haut, BUY = extrême bas
+    val extremeAgo: Int,        // nombre de bougies depuis l'extrême
+    val candle: String?,        // "CSM", "CSAK" ou "CSA"
+    val candleDir: Direction?   // BUY = haussière, SELL = baissière
 )
 
 /**
@@ -23,6 +32,8 @@ class BbmaCalc(private val c: List<Candle>) {
     private val low = bb.low
     private val ma5h = Ind.wma(highs, 5)
     private val ma5l = Ind.wma(lows, 5)
+    private val ma10h = Ind.wma(highs, 10)
+    private val ma10l = Ind.wma(lows, 10)
     private val ema50 = Ind.ema(closes, 50)
 
     /** 1 = tendance haussière (EMA50 monte), -1 = baissière, 0 = indéterminé. */
@@ -30,6 +41,52 @@ class BbmaCalc(private val c: List<Candle>) {
         val i = c.lastIndex
         if (i < 56 || ema50[i].isNaN() || ema50[i - 5].isNaN()) return 0
         return if (ema50[i] > ema50[i - 5]) 1 else -1
+    }
+
+    /**
+     * Repères affichés dans la carte du signal.
+     * CSM  : la bougie clôture hors de la bande de Bollinger haute (ou basse).
+     * CSAK : la bougie clôture au-delà des MA5/10 high (ou low) et aussi au-delà de la bande médiane.
+     * CSA  : la bougie clôture au-delà des MA5/10 high (ou low).
+     */
+    fun marks(): BbmaMarks {
+        val i = c.lastIndex
+        if (i < 56) return BbmaMarks(null, 0, null, null)
+
+        var ext: Direction? = null
+        var ago = 0
+        for (k in i downTo max(i - 15, 0)) {
+            if (ma5h[k] > up[k]) {
+                ext = Direction.SELL
+                ago = i - k
+                break
+            }
+            if (ma5l[k] < low[k]) {
+                ext = Direction.BUY
+                ago = i - k
+                break
+            }
+        }
+
+        var name: String? = null
+        var dir: Direction? = null
+        val cl = c[i].close
+        val maHigh = max(ma5h[i], ma10h[i])
+        val maLow = min(ma5l[i], ma10l[i])
+        if (cl > up[i]) {
+            name = "CSM"
+            dir = Direction.BUY
+        } else if (cl < low[i]) {
+            name = "CSM"
+            dir = Direction.SELL
+        } else if (cl > maHigh) {
+            dir = Direction.BUY
+            name = if (cl > mid[i]) "CSAK" else "CSA"
+        } else if (cl < maLow) {
+            dir = Direction.SELL
+            name = if (cl < mid[i]) "CSAK" else "CSA"
+        }
+        return BbmaMarks(ext, ago, name, dir)
     }
 
     fun detect(): BbmaHit? {
