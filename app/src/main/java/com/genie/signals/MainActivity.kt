@@ -6,11 +6,13 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -188,6 +190,7 @@ fun GenieApp(vm: MainVm) {
     val jLoading by vm.jLoading.collectAsState()
     var alerts by remember { mutableStateOf(Alerts.isOn(ctx)) }
     var screen by remember { mutableStateOf(0) }
+    var chart by remember { mutableStateOf<ChartSpec?>(null) }
     var capText by remember {
         mutableStateOf(LotCalc.capital(ctx).let { if (it > 0) numText(it) else "" })
     }
@@ -206,148 +209,168 @@ fun GenieApp(vm: MainVm) {
         }
     }
 
-    Scaffold(
-        containerColor = MaterialTheme.colorScheme.background,
-        topBar = { TopAppBar(title = { Text("Genie · Signaux SMC + BBMA") }) }
-    ) { pad ->
-        Column(
-            modifier = Modifier
-                .padding(pad)
-                .padding(horizontal = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                listOf("Scanner", "Journal").forEachIndexed { idx, label ->
-                    FilterChip(
-                        selected = idx == screen,
-                        onClick = {
-                            screen = idx
-                            if (idx == 1) vm.loadJournal(ctx)
-                        },
-                        label = { Text(label) }
-                    )
-                }
+    val spec = chart
+    if (spec != null) {
+        BackHandler { chart = null }
+        Scaffold(
+            containerColor = MaterialTheme.colorScheme.background,
+            topBar = { TopAppBar(title = { Text("Graphique") }) }
+        ) { pad ->
+            Column(modifier = Modifier.padding(pad)) {
+                ChartScreen(spec = spec, onBack = { chart = null })
             }
-
-            if (screen == 0) {
-                Row(
-                    modifier = Modifier.horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Tf.values().forEach { t ->
-                        FilterChip(
-                            selected = t == tf,
-                            onClick = { vm.tf.value = t },
-                            label = { Text(t.label) }
-                        )
-                    }
-                }
+        }
+    } else {
+        Scaffold(
+            containerColor = MaterialTheme.colorScheme.background,
+            topBar = { TopAppBar(title = { Text("Genie · Signaux SMC + BBMA") }) }
+        ) { pad ->
+            Column(
+                modifier = Modifier
+                    .padding(pad)
+                    .padding(horizontal = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf("Tous", "Forex", "Synthétiques").forEachIndexed { idx, label ->
+                    listOf("Scanner", "Journal").forEachIndexed { idx, label ->
                         FilterChip(
-                            selected = idx == filter,
-                            onClick = { vm.filter.value = idx },
+                            selected = idx == screen,
+                            onClick = {
+                                screen = idx
+                                if (idx == 1) vm.loadJournal(ctx)
+                            },
                             label = { Text(label) }
                         )
                     }
                 }
-                Button(
-                    onClick = { vm.scan(ctx) },
-                    enabled = !loading && !btLoading,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(if (loading) "Analyse en cours…" else "Scanner le marché")
-                }
-                OutlinedButton(
-                    onClick = { vm.backtest() },
-                    enabled = !loading && !btLoading,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(if (btLoading) "Backtest en cours…" else "Lancer le backtest")
-                }
-                if (loading || btLoading) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                Text(status, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                if (btStatus.isNotEmpty()) {
-                    Text(btStatus, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
 
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(
-                        value = capText,
-                        onValueChange = {
-                            capText = it
-                            LotCalc.save(ctx, parseNum(it), riskPct)
-                        },
-                        label = { Text("Capital ($)") },
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                        modifier = Modifier.weight(1f)
-                    )
-                    OutlinedTextField(
-                        value = riskText,
-                        onValueChange = {
-                            riskText = it
-                            LotCalc.save(ctx, capital, parseNum(it))
-                        },
-                        label = { Text("Risque (%)") },
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                        modifier = Modifier.weight(1f)
-                    )
-                }
-
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        "Alertes en arrière-plan (M5 à D1, score ≥ 70)",
-                        fontSize = 13.sp,
-                        modifier = Modifier.weight(1f)
-                    )
-                    Switch(
-                        checked = alerts,
-                        onCheckedChange = { on ->
-                            if (!on) {
-                                Alerts.disable(ctx)
-                                alerts = false
-                            } else if (Build.VERSION.SDK_INT >= 33 &&
-                                ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS)
-                                != PackageManager.PERMISSION_GRANTED
-                            ) {
-                                permLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                            } else {
-                                Alerts.enable(ctx)
-                                alerts = true
-                            }
+                if (screen == 0) {
+                    Row(
+                        modifier = Modifier.horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Tf.values().forEach { t ->
+                            FilterChip(
+                                selected = t == tf,
+                                onClick = { vm.tf.value = t },
+                                label = { Text(t.label) }
+                            )
                         }
-                    )
-                }
-
-                LazyColumn(
-                    modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    val bt = btResult
-                    if (bt != null && bt.total.trades > 0) {
-                        item { BtCard(bt, btLabel) }
                     }
-                    items(signals) { s -> SignalCard(s, LotCalc.describe(s, capital, riskPct)) }
-                    item {
-                        Text(
-                            "Genie fournit des signaux indicatifs issus d'une analyse automatique. " +
-                                "Ce n'est pas un conseil financier et aucun gain n'est garanti. " +
-                                "Teste d'abord en compte démo et ne risque jamais plus de 1 % de ton capital par trade.",
-                            fontSize = 11.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(vertical = 12.dp)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf("Tous", "Forex", "Synthétiques").forEachIndexed { idx, label ->
+                            FilterChip(
+                                selected = idx == filter,
+                                onClick = { vm.filter.value = idx },
+                                label = { Text(label) }
+                            )
+                        }
+                    }
+                    Button(
+                        onClick = { vm.scan(ctx) },
+                        enabled = !loading && !btLoading,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(if (loading) "Analyse en cours…" else "Scanner le marché")
+                    }
+                    OutlinedButton(
+                        onClick = { vm.backtest() },
+                        enabled = !loading && !btLoading,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(if (btLoading) "Backtest en cours…" else "Lancer le backtest")
+                    }
+                    if (loading || btLoading) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    Text(status, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (btStatus.isNotEmpty()) {
+                        Text(btStatus, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            value = capText,
+                            onValueChange = {
+                                capText = it
+                                LotCalc.save(ctx, parseNum(it), riskPct)
+                            },
+                            label = { Text("Capital ($)") },
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                            modifier = Modifier.weight(1f)
+                        )
+                        OutlinedTextField(
+                            value = riskText,
+                            onValueChange = {
+                                riskText = it
+                                LotCalc.save(ctx, capital, parseNum(it))
+                            },
+                            label = { Text("Risque (%)") },
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                            modifier = Modifier.weight(1f)
                         )
                     }
+
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            "Alertes en arrière-plan (M5 à D1, score ≥ 70)",
+                            fontSize = 13.sp,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Switch(
+                            checked = alerts,
+                            onCheckedChange = { on ->
+                                if (!on) {
+                                    Alerts.disable(ctx)
+                                    alerts = false
+                                } else if (Build.VERSION.SDK_INT >= 33 &&
+                                    ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS)
+                                    != PackageManager.PERMISSION_GRANTED
+                                ) {
+                                    permLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                } else {
+                                    Alerts.enable(ctx)
+                                    alerts = true
+                                }
+                            }
+                        )
+                    }
+
+                    LazyColumn(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        val bt = btResult
+                        if (bt != null && bt.total.trades > 0) {
+                            item { BtCard(bt, btLabel) }
+                        }
+                        items(signals) { s ->
+                            SignalCard(
+                                s,
+                                LotCalc.describe(s, capital, riskPct),
+                                onClick = { chart = chartSpecOf(s) }
+                            )
+                        }
+                        item {
+                            Text(
+                                "Genie fournit des signaux indicatifs issus d'une analyse automatique. " +
+                                    "Ce n'est pas un conseil financier et aucun gain n'est garanti. " +
+                                    "Teste d'abord en compte démo et ne risque jamais plus de 1 % de ton capital par trade.",
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(vertical = 12.dp)
+                            )
+                        }
+                    }
+                } else {
+                    JournalScreen(
+                        entries = journal,
+                        loading = jLoading,
+                        onRefresh = { vm.refreshJournal(ctx) },
+                        onClear = { vm.clearJournal(ctx) },
+                        onOpen = { e -> chart = chartSpecOf(e) }
+                    )
                 }
-            } else {
-                JournalScreen(
-                    entries = journal,
-                    loading = jLoading,
-                    onRefresh = { vm.refreshJournal(ctx) },
-                    onClear = { vm.clearJournal(ctx) }
-                )
             }
         }
     }
@@ -358,7 +381,8 @@ fun ColumnScope.JournalScreen(
     entries: List<JEntry>,
     loading: Boolean,
     onRefresh: () -> Unit,
-    onClear: () -> Unit
+    onClear: () -> Unit,
+    onOpen: (JEntry) -> Unit
 ) {
     val st = Journal.stats(entries)
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -387,7 +411,7 @@ fun ColumnScope.JournalScreen(
             Text(st.open.toString() + " en cours", fontSize = 13.sp)
             Text(
                 "Signaux de score 65 et plus. TP1 = +1,5 R, SL = −1 R. " +
-                    "Spread et commissions non inclus.",
+                    "Spread et commissions non inclus. Touche une ligne pour voir son graphique.",
                 fontSize = 11.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -406,7 +430,7 @@ fun ColumnScope.JournalScreen(
                 )
             }
         }
-        items(entries) { e -> JournalRow(e) }
+        items(entries) { e -> JournalRow(e, onClick = { onOpen(e) }) }
     }
 }
 
@@ -423,12 +447,14 @@ private fun statusLook(e: JEntry): Pair<String, Color> {
 }
 
 @Composable
-private fun JournalRow(e: JEntry) {
+private fun JournalRow(e: JEntry, onClick: () -> Unit) {
     val look = statusLook(e)
     val date = SimpleDateFormat("dd/MM HH:mm", Locale.getDefault()).format(Date(e.time * 1000))
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        modifier = Modifier.fillMaxWidth()
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onClick() }
     ) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -531,11 +557,13 @@ private fun BtRow(g: BtGroup) {
 }
 
 @Composable
-fun SignalCard(s: Signal, lot: String) {
+fun SignalCard(s: Signal, lot: String, onClick: () -> Unit) {
     val col = if (s.dir == Direction.BUY) Color(0xFF26A69A) else Color(0xFFEF5350)
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        modifier = Modifier.fillMaxWidth()
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onClick() }
     ) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -577,6 +605,11 @@ fun SignalCard(s: Signal, lot: String) {
             )
             Text("Score " + s.score + "/100", fontSize = 12.sp)
             s.reasons.forEach { r -> Text("• " + r, fontSize = 13.sp) }
+            Text(
+                "Touche la carte pour ouvrir le graphique",
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.primary
+            )
         }
     }
 }
