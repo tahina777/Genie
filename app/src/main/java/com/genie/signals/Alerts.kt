@@ -56,18 +56,27 @@ object Alerts {
             )
         }
         val sens = if (s.dir == Direction.BUY) "ACHAT" else "VENTE"
+        val combo = s.setup.startsWith("Combo ")
+        val title = if (combo) {
+            s.setup.removePrefix("Combo ").take(3) + " " + sens + " " + s.market.name
+        } else {
+            sens + " " + s.market.name + " (" + s.tf.label + ")"
+        }
         val text = "Entrée " + s.fmt(s.entry) + " · SL " + s.fmt(s.sl) + " · TP " + s.fmt(s.tp1) +
             " · Score " + s.score
         val lot = LotCalc.describe(s, LotCalc.capital(ctx), LotCalc.riskPct(ctx))
-        val big = s.setup + "\n" + text + (if (lot.isNotEmpty()) "\n" + lot else "")
+        var big = s.setup + "\n" + text
+        if (combo) big += "\n" + s.reasons.joinToString("\n")
+        if (lot.isNotEmpty()) big += "\n" + lot
         val n = NotificationCompat.Builder(ctx, channelId)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
-            .setContentTitle(sens + " " + s.market.name + " (" + s.tf.label + ")")
+            .setContentTitle(title)
             .setContentText(text)
             .setStyle(NotificationCompat.BigTextStyle().bigText(big))
             .setAutoCancel(true)
             .build()
-        NotificationManagerCompat.from(ctx).notify((s.market.code + s.tf.label + s.time).hashCode(), n)
+        NotificationManagerCompat.from(ctx)
+            .notify((s.market.code + s.tf.label + s.setup + s.time).hashCode(), n)
     }
 }
 
@@ -83,6 +92,9 @@ class ScanWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
         Tf.D1 -> 14400L
     }
 
+    /** H4 · H1 · M15 à chaque passage, D1 · H4 · H1 toutes les 30 minutes. */
+    private fun comboEvery(triple: List<Tf>): Long = if (triple.last() == Tf.M15) 0L else 1800L
+
     private fun minScore(tf: Tf): Int = if (tf == Tf.M5) 80 else 70
 
     override suspend fun doWork(): Result {
@@ -92,6 +104,7 @@ class ScanWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
         val now = System.currentTimeMillis() / 1000
         var tried = 0
         var ok = 0
+
         for (tf in frames) {
             val last = prefs.getLong("last_" + tf.label, 0L)
             if (now - last < every(tf)) continue
@@ -112,6 +125,27 @@ class ScanWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
                 // on passe au timeframe suivant
             }
         }
+
+        // Combos BBMA : REE, RME, REM, RRE, RMM sur 3 timeframes
+        for (triple in Combos.TRIPLES) {
+            val name = "combo_" + triple.joinToString("") { it.label }
+            val last = prefs.getLong(name, 0L)
+            if (now - last < comboEvery(triple)) continue
+            try {
+                val hits = Combos.scan(ALL_MARKETS, triple)
+                val fresh = Journal.add(ctx, hits)
+                for (s in fresh) {
+                    val key = "C|" + s.market.code + "|" + s.setup + "|" + s.dir + "|" + s.time
+                    if (seen.add(key)) Alerts.notify(ctx, s)
+                }
+                prefs.edit().putLong(name, now).apply()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // on réessaiera au prochain passage
+            }
+        }
+
         prefs.edit().putStringSet("seen", seen.toList().takeLast(300).toSet()).apply()
         try {
             Journal.refresh(ctx)
