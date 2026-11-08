@@ -34,6 +34,7 @@ object Engine {
 
         val bbma = BbmaCalc(c)
         val bh = bbma.detect()
+        val mk = bbma.marks()
         val smc = SmcCalc(c).detect()
         val sd = SdCalc(c).detect(atr)
         val trend = bbma.trend()
@@ -49,6 +50,50 @@ object Engine {
         var score = draft.score
         val reasons = draft.reasons.toMutableList()
         var target = draft.target
+
+        // Zones Premium / Discount du range des 100 dernières bougies
+        val pd = PdZone.of(c, entry)
+        if (pd != null) {
+            val buy = draft.dir == Direction.BUY
+            val label = pd.zone + ", " + pd.pct + " % du range"
+            if (pd.zone == "Discount") {
+                if (buy) {
+                    score += 8
+                    reasons.add("Achat en zone Discount (" + label + ") (+8)")
+                } else {
+                    score -= 12
+                    reasons.add("Attention : vente en zone Discount (" + label + ") (-12)")
+                }
+            } else if (pd.zone == "Premium") {
+                if (!buy) {
+                    score += 8
+                    reasons.add("Vente en zone Premium (" + label + ") (+8)")
+                } else {
+                    score -= 12
+                    reasons.add("Attention : achat en zone Premium (" + label + ") (-12)")
+                }
+            }
+        }
+
+        // Repères BBMA : Extrême, MHV / Re-entry et bougies CSM / CSAK / CSA
+        val line = bbmaLine(mk, bh)
+        if (line != null) reasons.add(line)
+        val cn = mk.candle
+        val cd = mk.candleDir
+        if (cn != null && cd != null) {
+            if (cd == draft.dir) {
+                val pts = when (cn) {
+                    "CSM" -> 8
+                    "CSAK" -> 6
+                    else -> 4
+                }
+                score += pts
+                reasons.add("Bougie " + cn + " dans le sens du signal (+" + pts + ")")
+            } else {
+                score -= 6
+                reasons.add("Attention : bougie " + cn + " de sens opposé (-6)")
+            }
+        }
 
         // Multi-timeframe + support/résistance du timeframe supérieur
         if (htfRaw != null && htfRaw.size >= 100) {
@@ -127,6 +172,24 @@ object Engine {
             reasons = reasons,
             time = last.time
         )
+    }
+
+    /** Ligne de repères BBMA, par exemple : Extrême bas (il y a 3 bougies) → MHV → CSAK haussier. */
+    private fun bbmaLine(mk: BbmaMarks, bh: BbmaHit?): String? {
+        val parts = mutableListOf<String>()
+        val ext = mk.extreme
+        if (ext != null) {
+            val side = if (ext == Direction.SELL) "Extrême haut" else "Extrême bas"
+            parts.add(if (mk.extremeAgo == 0) side else side + " (il y a " + mk.extremeAgo + " bougies)")
+        }
+        if (bh != null) parts.add(if (bh.setup.contains("MHV")) "MHV" else "Re-entry")
+        val cn = mk.candle
+        val cd = mk.candleDir
+        if (cn != null && cd != null) {
+            parts.add(cn + (if (cd == Direction.BUY) " haussier" else " baissier"))
+        }
+        if (parts.isEmpty()) return null
+        return "Repères BBMA : " + parts.joinToString(" → ")
     }
 
     /** Points hauts/bas respectés au moins 2 fois, regroupés par proximité. */
