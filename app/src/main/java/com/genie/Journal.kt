@@ -47,8 +47,8 @@ object Journal {
 
     /**
      * Enregistre les nouveaux signaux et renvoie ceux qui ont vraiment été ajoutés.
-     * Un signal du même marché, timeframe et direction est ignoré tant que le précédent
-     * est en cours (60 bougies max) ou date de moins de 8 bougies.
+     * Un signal du même marché, timeframe, direction et famille (normal ou combo) est ignoré
+     * tant que le précédent est en cours (60 bougies max) ou date de moins de 8 bougies.
      */
     fun add(ctx: Context, signals: List<Signal>): List<Signal> {
         val added = ArrayList<Signal>()
@@ -56,13 +56,15 @@ object Journal {
             val list = load(ctx).toMutableList()
             for (s in signals) {
                 if (s.score < MIN_SCORE) continue
-                val id = s.market.code + "|" + s.tf.label + "|" + s.dir + "|" + s.time
+                val id = s.market.code + "|" + s.tf.label + "|" + s.dir + "|" + s.setup + "|" + s.time
                 val buy = s.dir == Direction.BUY
+                val combo = s.setup.startsWith("Combo ")
                 val dup = list.any {
                     it.id == id || (
                         it.code == s.market.code &&
                             it.tfSeconds == s.tf.seconds &&
                             it.buy == buy &&
+                            it.setup.startsWith("Combo ") == combo &&
                             abs(s.time - it.time) <
                             s.tf.seconds.toLong() * (if (it.closed) COOLDOWN else MAX_HOLD)
                         )
