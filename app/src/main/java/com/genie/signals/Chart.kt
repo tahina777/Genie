@@ -32,7 +32,10 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.CancellationException
@@ -42,16 +45,16 @@ import java.util.Locale
 import kotlin.math.max
 import kotlin.math.min
 
-/** Ce qu'il faut pour dessiner le graphique d'un signal ou d'une ligne du journal. */
+/** Ce qu'il faut pour dessiner un graphique : celui d'un signal, d'une ligne du journal ou d'un marché libre. */
 class ChartSpec(
     val name: String,
     val code: String,
     val tfLabel: String,
     val tfSeconds: Int,
-    val buy: Boolean,
-    val entry: Double,
-    val sl: Double,
-    val tp1: Double,
+    val buy: Boolean?,
+    val entry: Double?,
+    val sl: Double?,
+    val tp1: Double?,
     val tp2: Double?,
     val time: Long,
     val decimals: Int,
@@ -66,6 +69,12 @@ fun chartSpecOf(s: Signal) = ChartSpec(
 fun chartSpecOf(e: JEntry) = ChartSpec(
     e.market, e.code, e.tf, e.tfSeconds, e.buy,
     e.entry, e.sl, e.tp1, null, e.time, e.decimals, e.setup
+)
+
+/** Graphique libre d'un marché, sans signal. */
+fun plainChartSpec(m: Market, tf: Tf) = ChartSpec(
+    m.name, m.code, tf.label, tf.seconds, null,
+    null, null, null, null, 0L, m.decimals, "Graphique libre"
 )
 
 private class ChartZone(val low: Double, val high: Double, val buy: Boolean)
@@ -83,7 +92,8 @@ private class ChartData(
     val zones: List<ChartZone>,
     val levels: List<Double>,
     val pdHigh: Double,
-    val pdLow: Double
+    val pdLow: Double,
+    val marks: String?
 )
 
 private fun fmtPrice(v: Double, d: Int): String =
@@ -116,6 +126,31 @@ private fun chartLevels(c: List<Candle>, atr: Double): List<Double> {
     }
     if (group.size >= 2) out.add(group.average())
     return out
+}
+
+/** Ligne de repères BBMA : Extrême, MHV / Re-entry, bougie CSM / CSAK / CSA. */
+private fun marksLine(c: List<Candle>): String? {
+    return try {
+        val cc = c.dropLast(1)
+        val b = BbmaCalc(cc)
+        val mk = b.marks()
+        val hit = b.detect()
+        val parts = ArrayList<String>()
+        val ext = mk.extreme
+        if (ext != null) {
+            val side = if (ext == Direction.SELL) "Extrême haut" else "Extrême bas"
+            parts.add(if (mk.extremeAgo == 0) side else side + " (il y a " + mk.extremeAgo + " bougies)")
+        }
+        if (hit != null) parts.add(if (hit.setup.contains("MHV")) "MHV" else "Re-entry")
+        val cn = mk.candle
+        val cd = mk.candleDir
+        if (cn != null && cd != null) {
+            parts.add(cn + (if (cd == Direction.BUY) " haussier" else " baissier"))
+        }
+        if (parts.isEmpty()) null else "Repères BBMA : " + parts.joinToString(" → ")
+    } catch (e: Exception) {
+        null
+    }
 }
 
 private fun buildData(c: List<Candle>): ChartData {
@@ -165,7 +200,8 @@ private fun buildData(c: List<Candle>): ChartData {
         zones,
         chartLevels(c, atr),
         pdHigh,
-        pdLow
+        pdLow,
+        marksLine(c)
     )
 }
 
@@ -179,6 +215,7 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
     var showZones by remember { mutableStateOf(false) }
     var visible by remember { mutableStateOf(80) }
     var shift by remember { mutableStateOf(0f) }
+    val tm = rememberTextMeasurer()
 
     LaunchedEffect(spec) {
         try {
@@ -197,7 +234,9 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
 
     val green = Color(0xFF26A69A)
     val red = Color(0xFFEF5350)
-    val sideColor = if (spec.buy) green else red
+    val tealTp2 = Color(0xFF80CBC4)
+    val buy = spec.buy
+    val sideColor = if (buy == null) Color.Gray else if (buy) green else red
 
     Column(
         modifier = Modifier
@@ -216,11 +255,13 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                     .weight(1f)
                     .padding(start = 12.dp)
             )
-            Text(
-                if (spec.buy) "ACHAT" else "VENTE",
-                color = sideColor,
-                fontWeight = FontWeight.Bold
-            )
+            if (buy != null) {
+                Text(
+                    if (buy) "ACHAT" else "VENTE",
+                    color = sideColor,
+                    fontWeight = FontWeight.Bold
+                )
+            }
         }
         Text(spec.setup, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
 
@@ -246,23 +287,31 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
             Canvas(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(360.dp)
+                    .height(380.dp)
                     .clipToBounds()
                     .pointerInput(d) {
                         detectHorizontalDragGestures { _, dragAmount ->
-                            val cw = size.width.toFloat() / visible
+                            val cw = (size.width - 64.dp.toPx()) / visible
                             val maxShift = (d.c.size - visible).coerceAtLeast(0).toFloat()
                             shift = (shift + dragAmount / cw).coerceIn(0f, maxShift)
                         }
                     }
             ) {
+                val labelW = 64.dp.toPx()
                 val w = size.width
                 val h = size.height
+                val plotW = w - labelW
                 val n = d.c.size
                 val vis = min(visible, n)
                 val end = n - shift.toInt().coerceIn(0, max(0, n - vis))
                 val start = max(0, end - vis)
-                val cw = w / vis
+                val cw = plotW / vis
+                val dec = spec.decimals
+
+                val entry = spec.entry
+                val slP = spec.sl
+                val tp1P = spec.tp1
+                val tp2P = spec.tp2
 
                 var hi = Double.NEGATIVE_INFINITY
                 var lo = Double.POSITIVE_INFINITY
@@ -270,14 +319,9 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                     hi = max(hi, d.c[j].high)
                     lo = min(lo, d.c[j].low)
                 }
-                for (p in listOf(spec.entry, spec.sl, spec.tp1)) {
+                for (p in listOfNotNull(entry, slP, tp1P, tp2P)) {
                     hi = max(hi, p)
                     lo = min(lo, p)
-                }
-                val t2 = spec.tp2
-                if (t2 != null) {
-                    hi = max(hi, t2)
-                    lo = min(lo, t2)
                 }
                 val pad = (hi - lo) * 0.05
                 hi += pad
@@ -287,23 +331,37 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                 fun y(p: Double): Float = (h - ((p - lo) / (hi - lo)) * h).toFloat()
                 fun x(j: Int): Float = (j - start + 0.5f) * cw
 
+                // Étiquette de prix dans la marge de droite
+                fun label(p: Double, textColor: Color, fill: Color) {
+                    val yy = y(p)
+                    if (yy < 0f || yy > h) return
+                    val layout = tm.measure(fmtPrice(p, dec), TextStyle(color = textColor, fontSize = 10.sp))
+                    val hh = layout.size.height.toFloat()
+                    drawRect(
+                        fill,
+                        topLeft = Offset(plotW, yy - hh / 2f),
+                        size = Size(labelW, hh)
+                    )
+                    drawText(layout, topLeft = Offset(plotW + 4f, yy - hh / 2f))
+                }
+
                 // Zones : Premium / Discount, Supply & Demand, SMC, niveaux
                 if (showZones) {
                     val mid = (d.pdHigh + d.pdLow) / 2.0
                     drawRect(
                         Color(0xFFEF5350).copy(alpha = 0.07f),
                         topLeft = Offset(0f, y(d.pdHigh)),
-                        size = Size(w, y(mid) - y(d.pdHigh))
+                        size = Size(plotW, y(mid) - y(d.pdHigh))
                     )
                     drawRect(
                         Color(0xFF26A69A).copy(alpha = 0.07f),
                         topLeft = Offset(0f, y(mid)),
-                        size = Size(w, y(d.pdLow) - y(mid))
+                        size = Size(plotW, y(d.pdLow) - y(mid))
                     )
                     drawLine(
                         Color.Gray,
                         Offset(0f, y(mid)),
-                        Offset(w, y(mid)),
+                        Offset(plotW, y(mid)),
                         strokeWidth = 1.5f,
                         pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f, 6f))
                     )
@@ -312,7 +370,7 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                         drawRect(
                             zc.copy(alpha = 0.20f),
                             topLeft = Offset(0f, y(z.high)),
-                            size = Size(w, max(y(z.low) - y(z.high), 2f))
+                            size = Size(plotW, max(y(z.low) - y(z.high), 2f))
                         )
                     }
                     for (lv in d.levels) {
@@ -320,12 +378,23 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                             drawLine(
                                 Color(0xFF9E9E9E),
                                 Offset(0f, y(lv)),
-                                Offset(w, y(lv)),
+                                Offset(plotW, y(lv)),
                                 strokeWidth = 1.5f,
                                 pathEffect = PathEffect.dashPathEffect(floatArrayOf(4f, 8f))
                             )
                         }
                     }
+                }
+
+                // Quadrillage léger
+                for (q in 1..4) {
+                    val p = lo + (hi - lo) * q / 5.0
+                    drawLine(
+                        Color(0xFF37474F).copy(alpha = 0.5f),
+                        Offset(0f, y(p)),
+                        Offset(plotW, y(p)),
+                        strokeWidth = 1f
+                    )
                 }
 
                 fun series(arr: DoubleArray, color: Color, sw: Float) {
@@ -382,46 +451,77 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                 val dash = PathEffect.dashPathEffect(floatArrayOf(14f, 10f))
                 fun hline(p: Double, color: Color) {
                     val yy = y(p)
-                    drawLine(color, Offset(0f, yy), Offset(w, yy), strokeWidth = 2.5f, pathEffect = dash)
+                    drawLine(color, Offset(0f, yy), Offset(plotW, yy), strokeWidth = 2.5f, pathEffect = dash)
                 }
-                hline(spec.entry, Color.White)
-                hline(spec.sl, red)
-                hline(spec.tp1, green)
-                if (t2 != null) hline(t2, Color(0xFF80CBC4))
+                if (entry != null) hline(entry, Color.White)
+                if (slP != null) hline(slP, red)
+                if (tp1P != null) hline(tp1P, green)
+                if (tp2P != null) hline(tp2P, tealTp2)
 
-                // Flèche sur la bougie du signal
-                val idx = d.c.indexOfFirst { it.time == spec.time }
-                if (idx in start until end) {
-                    val cx = x(idx)
-                    val s = max(cw * 1.2f, 14f)
-                    val path = Path()
-                    if (spec.buy) {
-                        val base = y(d.c[idx].low) + 6f
-                        path.moveTo(cx, base)
-                        path.lineTo(cx - s / 2f, base + s)
-                        path.lineTo(cx + s / 2f, base + s)
-                    } else {
-                        val base = y(d.c[idx].high) - 6f
-                        path.moveTo(cx, base)
-                        path.lineTo(cx - s / 2f, base - s)
-                        path.lineTo(cx + s / 2f, base - s)
+                // Flèche sur la bougie du signal (plus grande)
+                if (buy != null) {
+                    val idx = d.c.indexOfFirst { it.time == spec.time }
+                    if (idx in start until end) {
+                        val cx = x(idx)
+                        val s = max(cw * 1.8f, 22f)
+                        val path = Path()
+                        if (buy) {
+                            val base = y(d.c[idx].low) + 8f
+                            path.moveTo(cx, base)
+                            path.lineTo(cx - s / 2f, base + s)
+                            path.lineTo(cx + s / 2f, base + s)
+                        } else {
+                            val base = y(d.c[idx].high) - 8f
+                            path.moveTo(cx, base)
+                            path.lineTo(cx - s / 2f, base - s)
+                            path.lineTo(cx + s / 2f, base - s)
+                        }
+                        path.close()
+                        drawPath(path, sideColor)
                     }
-                    path.close()
-                    drawPath(path, sideColor)
                 }
+
+                // Prix actuel : point sur la dernière bougie
+                val lastC = d.c.last()
+                if (end == n) {
+                    drawCircle(Color.White, radius = 6f, center = Offset(x(n - 1), y(lastC.close)))
+                }
+
+                // Marge de droite : fond, échelle des prix et étiquettes
+                drawRect(Color(0xFF0E1117), topLeft = Offset(plotW, 0f), size = Size(labelW, h))
+                for (q in 1..4) {
+                    val p = lo + (hi - lo) * q / 5.0
+                    val layout = tm.measure(fmtPrice(p, dec), TextStyle(color = Color(0xFF90A4AE), fontSize = 10.sp))
+                    drawText(layout, topLeft = Offset(plotW + 4f, y(p) - layout.size.height / 2f))
+                }
+                if (tp2P != null) label(tp2P, Color.Black, tealTp2)
+                if (tp1P != null) label(tp1P, Color.Black, green)
+                if (slP != null) label(slP, Color.White, red)
+                if (entry != null) label(entry, Color.Black, Color.White)
+                label(lastC.close, Color.White, Color(0xFF546E7A))
             }
 
             val dec = spec.decimals
-            Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                Text("Entrée " + fmtPrice(spec.entry, dec), fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                Text("SL " + fmtPrice(spec.sl, dec), fontSize = 13.sp, color = red, fontWeight = FontWeight.SemiBold)
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                Text("TP1 " + fmtPrice(spec.tp1, dec), fontSize = 13.sp, color = green, fontWeight = FontWeight.SemiBold)
-                val tp2 = spec.tp2
-                if (tp2 != null) {
-                    Text("TP2 " + fmtPrice(tp2, dec), fontSize = 13.sp, color = Color(0xFF80CBC4), fontWeight = FontWeight.SemiBold)
+            val entryV = spec.entry
+            val slV = spec.sl
+            val tp1V = spec.tp1
+            val tp2V = spec.tp2
+            if (entryV != null && slV != null && tp1V != null) {
+                Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                    Text("Entrée " + fmtPrice(entryV, dec), fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    Text("SL " + fmtPrice(slV, dec), fontSize = 13.sp, color = red, fontWeight = FontWeight.SemiBold)
                 }
+                Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                    Text("TP1 " + fmtPrice(tp1V, dec), fontSize = 13.sp, color = green, fontWeight = FontWeight.SemiBold)
+                    if (tp2V != null) {
+                        Text("TP2 " + fmtPrice(tp2V, dec), fontSize = 13.sp, color = tealTp2, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+            }
+
+            val marks = d.marks
+            if (marks != null) {
+                Text(marks, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary)
             }
 
             var legend = ""
@@ -446,7 +546,8 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
             }
             Text(
                 "Fais glisser le graphique vers la droite pour remonter dans le temps. " +
-                    "La flèche marque la bougie du signal.",
+                    "Le point blanc marque le prix actuel" +
+                    (if (buy != null) ", la flèche la bougie du signal." else "."),
                 fontSize = 11.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(bottom = 12.dp)
