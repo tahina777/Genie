@@ -35,7 +35,9 @@ object Scanner {
                         } catch (e: Exception) {
                             null
                         }
-                        Engine.analyse(m, tf, candles, htf)
+                        val sig = Engine.analyse(m, tf, candles, htf)
+                        // Signal périmé : TP1 ou SL déjà touché, ou entrée dépassée
+                        if (sig != null && Fresh.stale(sig, candles.last())) null else sig
                     } catch (e: CancellationException) {
                         throw e
                     } catch (e: Exception) {
