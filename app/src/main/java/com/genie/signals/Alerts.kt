@@ -82,7 +82,8 @@ object Alerts {
 
 class ScanWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, params) {
 
-    private val frames = listOf(Tf.M5, Tf.M15, Tf.H1, Tf.H4, Tf.D1)
+    /** Timeframes surveillés par les alertes (M5 et M15 retirés). */
+    private val frames = listOf(Tf.H1, Tf.H4, Tf.D1)
 
     /** Délai minimum (secondes) entre deux analyses d'un timeframe, pour économiser la batterie. */
     private fun every(tf: Tf): Long = when (tf) {
