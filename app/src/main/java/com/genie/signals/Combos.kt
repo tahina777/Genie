@@ -26,8 +26,8 @@ class ComboMatch(val code: String, val dir: Direction, val states: List<TfState>
  * Les 3 timeframes doivent aller dans le même sens (tous vente ou tous achat).
  */
 object Combos {
+    /** Une seule série : D1 · H4 · H1 (H4 · H1 · M15 a été retirée). */
     val TRIPLES: List<List<Tf>> = listOf(
-        listOf(Tf.H4, Tf.H1, Tf.M15),
         listOf(Tf.D1, Tf.H4, Tf.H1)
     )
 
@@ -91,11 +91,14 @@ object Combos {
 
     private suspend fun check(m: Market, triple: List<Tf>): Signal? {
         val closed = ArrayList<List<Candle>>()
+        var forming: Candle? = null
         for (tf in triple) {
             val raw = Deriv.candles(m.code, tf.seconds, 300)
             if (raw.size < 100) return null
             // On ignore la dernière bougie (encore en formation)
             closed.add(raw.dropLast(1))
+            // À la fin de la boucle : bougie en cours du plus petit timeframe
+            forming = raw.last()
         }
         val small = triple.last()
         val c = closed.last()
@@ -105,7 +108,10 @@ object Combos {
         if (now - last.time > small.seconds * 4L) return null
 
         val mt = match(closed, triple) ?: return null
-        return build(m, small, c, triple, mt)
+        val sig = build(m, small, c, triple, mt) ?: return null
+        // Signal périmé : TP1 ou SL déjà touché, ou entrée dépassée
+        val f = forming
+        return if (f != null && Fresh.stale(sig, f)) null else sig
     }
 
     fun build(m: Market, small: Tf, c: List<Candle>, triple: List<Tf>, mt: ComboMatch): Signal? {
