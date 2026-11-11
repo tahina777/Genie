@@ -339,6 +339,29 @@ fun GenieApp(vm: MainVm) {
                         )
                     }
 
+                    Text(
+                        "Graphique d'un marché (" + tf.label + ")",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Row(
+                        modifier = Modifier.horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        val shown = when (filter) {
+                            1 -> ALL_MARKETS.filter { !it.synthetic }
+                            2 -> ALL_MARKETS.filter { it.synthetic }
+                            else -> ALL_MARKETS
+                        }
+                        shown.forEach { m ->
+                            FilterChip(
+                                selected = false,
+                                onClick = { chart = plainChartSpec(m, tf) },
+                                label = { Text(m.name) }
+                            )
+                        }
+                    }
+
                     LazyColumn(
                         modifier = Modifier.weight(1f),
                         verticalArrangement = Arrangement.spacedBy(10.dp)
