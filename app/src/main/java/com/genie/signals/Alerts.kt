@@ -17,6 +17,8 @@ import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.TimeUnit
 
 object Alerts {
@@ -35,10 +37,14 @@ object Alerts {
         WorkManager.getInstance(ctx)
             .enqueueUniquePeriodicWork(WORK, ExistingPeriodicWorkPolicy.UPDATE, req)
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean("alerts", true).apply()
+        // Alarme à chaque clôture de bougie
+        Schedule.scheduleNext(ctx)
+        if (!Schedule.canExact(ctx)) Schedule.askExactPermission(ctx)
     }
 
     fun disable(ctx: Context) {
         WorkManager.getInstance(ctx).cancelUniqueWork(WORK)
+        Schedule.cancel(ctx)
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean("alerts", false).apply()
     }
 
@@ -82,10 +88,15 @@ object Alerts {
 
 class ScanWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, params) {
 
-    /** Timeframes surveillés par les alertes (M5 et M15 retirés). */
+    private companion object {
+        /** Un seul passage à la fois : l'alarme et la vérification de secours ne se marchent pas dessus. */
+        val gate = Mutex()
+    }
+
+    /** Timeframes surveillés par les alertes. */
     private val frames = listOf(Tf.H1, Tf.H4, Tf.D1)
 
-    /** Délai minimum (secondes) entre deux analyses d'un timeframe, pour économiser la batterie. */
+    /** Délai minimum (secondes) entre deux analyses d'un timeframe pour la vérification de secours. */
     private fun every(tf: Tf): Long = when (tf) {
         Tf.M5, Tf.M15 -> 0L
         Tf.H1 -> 1800L
@@ -93,22 +104,35 @@ class ScanWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
         Tf.D1 -> 14400L
     }
 
-    /** H4 · H1 · M15 à chaque passage, D1 · H4 · H1 toutes les 30 minutes. */
-    private fun comboEvery(triple: List<Tf>): Long = if (triple.last() == Tf.M15) 0L else 1800L
+    /** Vérification de secours du combo D1 · H4 · H1 : toutes les 30 minutes. */
+    private fun comboEvery(): Long = 1800L
 
     private fun minScore(tf: Tf): Int = if (tf == Tf.M5) 80 else 70
 
-    override suspend fun doWork(): Result {
+    override suspend fun doWork(): Result = gate.withLock { work() }
+
+    private suspend fun work(): Result {
         val ctx = applicationContext
         val prefs = ctx.getSharedPreferences("genie", Context.MODE_PRIVATE)
+
+        // Garde-fou : réarme l'alarme de clôture si elle a été interrompue
+        if (Alerts.isOn(ctx)) Schedule.scheduleNext(ctx)
+
+        // Lancé par l'alarme : on analyse les timeframes qui viennent de se terminer
+        val forced = inputData.getString("tfs")?.split(",")?.toSet()
+
         val seen = (prefs.getStringSet("seen", emptySet()) ?: emptySet()).toMutableSet()
         val now = System.currentTimeMillis() / 1000
         var tried = 0
         var ok = 0
 
         for (tf in frames) {
-            val last = prefs.getLong("last_" + tf.label, 0L)
-            if (now - last < every(tf)) continue
+            if (forced != null) {
+                if (tf.label !in forced) continue
+            } else {
+                val last = prefs.getLong("last_" + tf.label, 0L)
+                if (now - last < every(tf)) continue
+            }
             tried++
             try {
                 val res = Scanner.scan(ALL_MARKETS, tf)
@@ -130,8 +154,12 @@ class ScanWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
         // Combos BBMA : REE, RME, REM, RRE, RMM sur 3 timeframes
         for (triple in Combos.TRIPLES) {
             val name = "combo_" + triple.joinToString("") { it.label }
-            val last = prefs.getLong(name, 0L)
-            if (now - last < comboEvery(triple)) continue
+            if (forced != null) {
+                if (triple.last().label !in forced) continue
+            } else {
+                val last = prefs.getLong(name, 0L)
+                if (now - last < comboEvery()) continue
+            }
             try {
                 val hits = Combos.scan(ALL_MARKETS, triple)
                 val fresh = Journal.add(ctx, hits)
