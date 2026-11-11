@@ -64,7 +64,7 @@ import java.util.Date
 import java.util.Locale
 
 class MainVm : ViewModel() {
-    val tf = MutableStateFlow(Tf.M15)
+    val tf = MutableStateFlow(Tf.H1)
     val filter = MutableStateFlow(0) // 0 = tous, 1 = forex, 2 = synthétiques
     val signals = MutableStateFlow<List<Signal>>(emptyList())
     val loading = MutableStateFlow(false)
@@ -173,6 +173,9 @@ private fun numText(v: Double): String =
 
 private fun parseNum(s: String): Double = s.replace(',', '.').toDoubleOrNull() ?: 0.0
 
+/** Timeframes proposés pour le scan et le backtest. */
+private val SCAN_FRAMES = listOf(Tf.H1, Tf.H4, Tf.D1)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun GenieApp(vm: MainVm) {
@@ -249,7 +252,7 @@ fun GenieApp(vm: MainVm) {
                         modifier = Modifier.horizontalScroll(rememberScrollState()),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Tf.values().forEach { t ->
+                        SCAN_FRAMES.forEach { t ->
                             FilterChip(
                                 selected = t == tf,
                                 onClick = { vm.tf.value = t },
@@ -313,7 +316,7 @@ fun GenieApp(vm: MainVm) {
 
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
-                            "Alertes en arrière-plan (M5 à D1, score ≥ 70)",
+                            "Alertes en arrière-plan (H1, H4, D1 et combos BBMA, score ≥ 70)",
                             fontSize = 13.sp,
                             modifier = Modifier.weight(1f)
                         )
