@@ -75,6 +75,10 @@ class MainVm : ViewModel() {
     val btLabel = MutableStateFlow("")
     val btStatus = MutableStateFlow("")
 
+    val entries = MutableStateFlow<List<PendingEntry>>(emptyList())
+    val entLoading = MutableStateFlow(false)
+    val entStatus = MutableStateFlow("")
+
     val journal = MutableStateFlow<List<JEntry>>(emptyList())
     val jLoading = MutableStateFlow(false)
 
@@ -84,8 +88,10 @@ class MainVm : ViewModel() {
         else -> ALL_MARKETS
     }
 
+    private fun busy(): Boolean = loading.value || btLoading.value || entLoading.value
+
     fun scan(ctx: Context) {
-        if (loading.value || btLoading.value) return
+        if (busy()) return
         val app = ctx.applicationContext
         viewModelScope.launch {
             loading.value = true
@@ -107,7 +113,7 @@ class MainVm : ViewModel() {
     }
 
     fun backtest() {
-        if (loading.value || btLoading.value) return
+        if (busy()) return
         viewModelScope.launch {
             btLoading.value = true
             btStatus.value = "Backtest en cours… (environ 1 minute)"
@@ -121,6 +127,27 @@ class MainVm : ViewModel() {
                 btStatus.value = "Erreur : vérifie ta connexion internet."
             }
             btLoading.value = false
+        }
+    }
+
+    fun findEntries() {
+        if (busy()) return
+        viewModelScope.launch {
+            entLoading.value = true
+            entStatus.value = "Recherche des entrées en cours…"
+            val list = marketList()
+            try {
+                val res = Entries.scan(list, tf.value)
+                entries.value = res
+                entStatus.value = if (res.isEmpty()) {
+                    "Aucune entrée en attente pour le moment dans ce timeframe."
+                } else {
+                    res.size.toString() + " entrée(s) en attente (" + tf.value.label + ")"
+                }
+            } catch (e: Exception) {
+                entStatus.value = "Erreur : vérifie ta connexion internet."
+            }
+            entLoading.value = false
         }
     }
 
@@ -189,6 +216,9 @@ fun GenieApp(vm: MainVm) {
     val btResult by vm.btResult.collectAsState()
     val btLabel by vm.btLabel.collectAsState()
     val btStatus by vm.btStatus.collectAsState()
+    val entries by vm.entries.collectAsState()
+    val entLoading by vm.entLoading.collectAsState()
+    val entStatus by vm.entStatus.collectAsState()
     val journal by vm.journal.collectAsState()
     val jLoading by vm.jLoading.collectAsState()
     var alerts by remember { mutableStateOf(Alerts.isOn(ctx)) }
@@ -200,6 +230,7 @@ fun GenieApp(vm: MainVm) {
     var riskText by remember { mutableStateOf(numText(LotCalc.riskPct(ctx))) }
     val capital = parseNum(capText)
     val riskPct = parseNum(riskText)
+    val busy = loading || btLoading || entLoading
 
     LaunchedEffect(Unit) { vm.loadJournal(ctx) }
 
@@ -271,20 +302,30 @@ fun GenieApp(vm: MainVm) {
                     }
                     Button(
                         onClick = { vm.scan(ctx) },
-                        enabled = !loading && !btLoading,
+                        enabled = !busy,
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Text(if (loading) "Analyse en cours…" else "Scanner le marché")
                     }
                     OutlinedButton(
+                        onClick = { vm.findEntries() },
+                        enabled = !busy,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(if (entLoading) "Recherche des entrées…" else "Entrées en attente")
+                    }
+                    OutlinedButton(
                         onClick = { vm.backtest() },
-                        enabled = !loading && !btLoading,
+                        enabled = !busy,
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Text(if (btLoading) "Backtest en cours…" else "Lancer le backtest")
                     }
-                    if (loading || btLoading) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    if (busy) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
                     Text(status, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (entStatus.isNotEmpty()) {
+                        Text(entStatus, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                     if (btStatus.isNotEmpty()) {
                         Text(btStatus, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
@@ -369,6 +410,23 @@ fun GenieApp(vm: MainVm) {
                         val bt = btResult
                         if (bt != null && bt.total.trades > 0) {
                             item { BtCard(bt, btLabel) }
+                        }
+                        if (entries.isNotEmpty()) {
+                            item {
+                                Text(
+                                    "Entrées en attente : ordres limites à surveiller, ce ne sont pas des signaux validés.",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                            items(entries) { p ->
+                                EntryCard(
+                                    p,
+                                    LotCalc.describe(p.toSignal(), capital, riskPct),
+                                    onClick = { chart = chartSpecOf(p) }
+                                )
+                            }
                         }
                         items(signals) { s ->
                             SignalCard(
@@ -579,6 +637,67 @@ private fun BtRow(g: BtGroup) {
             fontSize = 11.sp,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
+    }
+}
+
+@Composable
+fun EntryCard(p: PendingEntry, lot: String, onClick: () -> Unit) {
+    val lv = p.level
+    val m = p.market
+    val col = if (lv.buy) Color(0xFF26A69A) else Color(0xFFEF5350)
+    fun f(v: Double): String = String.format(Locale.US, "%." + m.decimals + "f", v)
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onClick() }
+    ) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    m.name,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 17.sp,
+                    modifier = Modifier.weight(1f)
+                )
+                Text(
+                    if (lv.buy) "ACHAT LIMITE" else "VENTE LIMITE",
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 12.sp,
+                    modifier = Modifier
+                        .background(col, RoundedCornerShape(8.dp))
+                        .padding(horizontal = 10.dp, vertical = 4.dp)
+                )
+            }
+            Text(
+                p.tf.label + " · " + lv.kind + " · formée il y a " + lv.ago + " bougies",
+                fontSize = 13.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            LevelRow("Entrée limite", f(lv.entry), Color(0xFF29B6F6))
+            LevelRow("Stop Loss", f(lv.sl), Color(0xFFEF5350))
+            LevelRow("Take Profit 1", f(lv.tp1), Color(0xFF26A69A))
+            LevelRow("Take Profit 2", f(lv.tp2), Color(0xFF26A69A))
+            Text(
+                "Prix actuel " + f(p.price) + " · à " + f(lv.dist) + " (" + num(lv.distAtr, 1) + " ATR)",
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            if (lot.isNotEmpty()) {
+                Text(
+                    lot,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
+            Text(
+                "Touche la carte pour voir le graphique",
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.primary
+            )
+        }
     }
 }
 
