@@ -42,6 +42,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.util.Locale
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 
@@ -79,6 +80,15 @@ fun plainChartSpec(m: Market, tf: Tf) = ChartSpec(
 
 private class ChartZone(val low: Double, val high: Double, val buy: Boolean)
 
+/**
+ * Marque sur une bougie. kind : E = Extrême, M = MHV, R = Re-entry,
+ * 1 = CSM, 2 = CSAK, 3 = CSA, S = sweep de liquidité.
+ * buy = true : marque haussière, dessinée sous la bougie ; false : au-dessus.
+ */
+private class Mark(val idx: Int, val kind: Char, val buy: Boolean)
+
+private class LiqLine(val price: Double, val fromIdx: Int, val label: String, val high: Boolean)
+
 private class ChartData(
     val c: List<Candle>,
     val bbUp: DoubleArray,
@@ -93,7 +103,9 @@ private class ChartData(
     val levels: List<Double>,
     val pdHigh: Double,
     val pdLow: Double,
-    val marks: String?
+    val bbmaLine: String?,
+    val marks: List<Mark>,
+    val liq: List<LiqLine>
 )
 
 private fun fmtPrice(v: Double, d: Int): String =
@@ -153,6 +165,180 @@ private fun marksLine(c: List<Candle>): String? {
     }
 }
 
+/**
+ * Marques BBMA sur chaque bougie terminée, avec exactement les règles de Bbma.kt.
+ * Extrême : première bougie d'une série où la MA5 sort de la bande de Bollinger.
+ * MHV et Re-entry : même règle que le moteur. CSM, CSAK, CSA : tes définitions.
+ */
+private fun buildBbmaMarks(
+    c: List<Candle>,
+    up: DoubleArray,
+    mid: DoubleArray,
+    low: DoubleArray,
+    m5h: DoubleArray,
+    m5l: DoubleArray,
+    m10h: DoubleArray,
+    m10l: DoubleArray
+): List<Mark> {
+    val out = ArrayList<Mark>()
+    val n = c.size
+    for (i in 56 until n - 1) {
+        // Extrême : première bougie de la série
+        if (m5h[i] > up[i] && !(m5h[i - 1] > up[i - 1])) out.add(Mark(i, 'E', false))
+        if (m5l[i] < low[i] && !(m5l[i - 1] < low[i - 1])) out.add(Mark(i, 'E', true))
+
+        // Dernier Extrême dans les 15 bougies précédentes
+        var e = -1
+        var sell = false
+        for (k in i downTo max(i - 15, 0)) {
+            if (m5h[k] > up[k]) {
+                e = k
+                sell = true
+                break
+            }
+            if (m5l[k] < low[k]) {
+                e = k
+                sell = false
+                break
+            }
+        }
+        if (e != -1 && e != i) {
+            val cur = c[i]
+            if (sell) {
+                if (cur.high > up[i] && m5h[i] <= up[i] && cur.close < up[i]) {
+                    out.add(Mark(i, 'M', false))
+                } else {
+                    var went = false
+                    for (k in e + 1 until i) if (c[k].close < mid[k]) went = true
+                    if (went && cur.high >= mid[i] && cur.close < mid[i]) out.add(Mark(i, 'R', false))
+                }
+            } else {
+                if (cur.low < low[i] && m5l[i] >= low[i] && cur.close > low[i]) {
+                    out.add(Mark(i, 'M', true))
+                } else {
+                    var went = false
+                    for (k in e + 1 until i) if (c[k].close > mid[k]) went = true
+                    if (went && cur.low <= mid[i] && cur.close > mid[i]) out.add(Mark(i, 'R', true))
+                }
+            }
+        }
+
+        // Bougies CSM / CSAK / CSA
+        val cl = c[i].close
+        val maHigh = max(m5h[i], m10h[i])
+        val maLow = min(m5l[i], m10l[i])
+        if (cl > up[i]) {
+            out.add(Mark(i, '1', true))
+        } else if (cl < low[i]) {
+            out.add(Mark(i, '1', false))
+        } else if (cl > maHigh) {
+            out.add(Mark(i, if (cl > mid[i]) '2' else '3', true))
+        } else if (cl < maLow) {
+            out.add(Mark(i, if (cl < mid[i]) '2' else '3', false))
+        }
+    }
+    return out
+}
+
+/** Regroupe des points proches ; renvoie (indice du premier point, prix moyen) pour les groupes d'au moins 2. */
+private fun clusterLines(pts: List<Pair<Int, Double>>, tol: Double): List<Pair<Int, Double>> {
+    val sorted = pts.sortedBy { it.second }
+    val out = ArrayList<Pair<Int, Double>>()
+    var grp = ArrayList<Pair<Int, Double>>()
+    fun flush() {
+        if (grp.size >= 2) {
+            var first = Int.MAX_VALUE
+            var sum = 0.0
+            for (g in grp) {
+                first = min(first, g.first)
+                sum += g.second
+            }
+            out.add(Pair(first, sum / grp.size))
+        }
+        grp = ArrayList()
+    }
+    for (p in sorted) {
+        if (grp.isNotEmpty() && p.second - grp.last().second > tol) flush()
+        grp.add(p)
+    }
+    flush()
+    return out
+}
+
+/**
+ * Liquidité : hauts et bas égaux (EQH, EQL), hauts et bas récents non touchés,
+ * et sweeps (la mèche dépasse un niveau mais la bougie clôture de l'autre côté).
+ */
+private fun buildLiquidity(c: List<Candle>, atr: Double): Pair<List<LiqLine>, List<Mark>> {
+    val marks = ArrayList<Mark>()
+    val lines = ArrayList<LiqLine>()
+    val n = c.size
+    if (atr <= 0.0 || n < 30) return Pair(lines, marks)
+
+    val k = 3
+    val ph = ArrayList<Int>()
+    val pl = ArrayList<Int>()
+    for (i in k until n - k) {
+        var isH = true
+        var isL = true
+        for (d in 1..k) {
+            if (c[i].high <= c[i - d].high || c[i].high <= c[i + d].high) isH = false
+            if (c[i].low >= c[i - d].low || c[i].low >= c[i + d].low) isL = false
+        }
+        if (isH) ph.add(i)
+        if (isL) pl.add(i)
+    }
+
+    val last = c.last().close
+    val tol = 0.15 * atr
+    val done = HashSet<Int>()
+
+    val openHighs = ArrayList<Int>()
+    for (p in ph) {
+        val price = c[p].high
+        var j = p + 1
+        while (j < n && c[j].high <= price) j++
+        if (j >= n) {
+            openHighs.add(p)
+        } else if (j <= n - 2 && c[j].close <= price && done.add(j * 2)) {
+            marks.add(Mark(j, 'S', false))
+        }
+    }
+    val openLows = ArrayList<Int>()
+    for (p in pl) {
+        val price = c[p].low
+        var j = p + 1
+        while (j < n && c[j].low >= price) j++
+        if (j >= n) {
+            openLows.add(p)
+        } else if (j <= n - 2 && c[j].close >= price && done.add(j * 2 + 1)) {
+            marks.add(Mark(j, 'S', true))
+        }
+    }
+
+    val eqHigh = clusterLines(openHighs.map { Pair(it, c[it].high) }, tol)
+    val eqLow = clusterLines(openLows.map { Pair(it, c[it].low) }, tol)
+    for (e in eqHigh.sortedBy { abs(it.second - last) }.take(3)) {
+        lines.add(LiqLine(e.second, e.first, "EQH", true))
+    }
+    for (e in eqLow.sortedBy { abs(it.second - last) }.take(3)) {
+        lines.add(LiqLine(e.second, e.first, "EQL", false))
+    }
+
+    val singleHighs = openHighs
+        .filter { p -> eqHigh.none { abs(it.second - c[p].high) <= tol } }
+        .sortedBy { abs(c[it].high - last) }
+        .take(3)
+    for (p in singleHighs) lines.add(LiqLine(c[p].high, p, "Liq. haute", true))
+    val singleLows = openLows
+        .filter { p -> eqLow.none { abs(it.second - c[p].low) <= tol } }
+        .sortedBy { abs(c[it].low - last) }
+        .take(3)
+    for (p in singleLows) lines.add(LiqLine(c[p].low, p, "Liq. basse", false))
+
+    return Pair(lines, marks)
+}
+
 private fun buildData(c: List<Candle>): ChartData {
     val n = c.size
     val closes = DoubleArray(n) { c[it].close }
@@ -164,6 +350,15 @@ private fun buildData(c: List<Candle>): ChartData {
     val w10h = Ind.wma(highs, 10)
     val w10l = Ind.wma(lows, 10)
     val e50 = Ind.ema(closes, 50)
+
+    val upA = DoubleArray(n) { bb.up[it] }
+    val midA = DoubleArray(n) { bb.mid[it] }
+    val lowA = DoubleArray(n) { bb.low[it] }
+    val m5h = DoubleArray(n) { w5h[it] }
+    val m5l = DoubleArray(n) { w5l[it] }
+    val m10h = DoubleArray(n) { w10h[it] }
+    val m10l = DoubleArray(n) { w10l[it] }
+    val e50A = DoubleArray(n) { e50[it] }
 
     val atr = Ind.atr(c)
     val zones = ArrayList<ChartZone>()
@@ -187,21 +382,24 @@ private fun buildData(c: List<Candle>): ChartData {
         pdLow = min(pdLow, c[k].low)
     }
 
+    val marks = ArrayList<Mark>()
+    try {
+        marks.addAll(buildBbmaMarks(c, upA, midA, lowA, m5h, m5l, m10h, m10l))
+    } catch (e: Exception) {
+        // marques BBMA indisponibles
+    }
+    var liq: List<LiqLine> = emptyList()
+    try {
+        val res = buildLiquidity(c, atr)
+        liq = res.first
+        marks.addAll(res.second)
+    } catch (e: Exception) {
+        // liquidité indisponible
+    }
+
     return ChartData(
-        c,
-        DoubleArray(n) { bb.up[it] },
-        DoubleArray(n) { bb.mid[it] },
-        DoubleArray(n) { bb.low[it] },
-        DoubleArray(n) { w5h[it] },
-        DoubleArray(n) { w5l[it] },
-        DoubleArray(n) { w10h[it] },
-        DoubleArray(n) { w10l[it] },
-        DoubleArray(n) { e50[it] },
-        zones,
-        chartLevels(c, atr),
-        pdHigh,
-        pdLow,
-        marksLine(c)
+        c, upA, midA, lowA, m5h, m5l, m10h, m10l, e50A,
+        zones, chartLevels(c, atr), pdHigh, pdLow, marksLine(c), marks, liq
     )
 }
 
@@ -213,6 +411,11 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
     var showMa by remember { mutableStateOf(true) }
     var showEma by remember { mutableStateOf(false) }
     var showZones by remember { mutableStateOf(false) }
+    var showE by remember { mutableStateOf(false) }
+    var showM by remember { mutableStateOf(false) }
+    var showR by remember { mutableStateOf(false) }
+    var showCs by remember { mutableStateOf(false) }
+    var showLiq by remember { mutableStateOf(false) }
     var visible by remember { mutableStateOf(80) }
     var shift by remember { mutableStateOf(0f) }
     val tm = rememberTextMeasurer()
@@ -282,6 +485,11 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                 FilterChip(selected = showMa, onClick = { showMa = !showMa }, label = { Text("MA5/10") })
                 FilterChip(selected = showEma, onClick = { showEma = !showEma }, label = { Text("EMA50") })
                 FilterChip(selected = showZones, onClick = { showZones = !showZones }, label = { Text("Zones") })
+                FilterChip(selected = showE, onClick = { showE = !showE }, label = { Text("Extrême") })
+                FilterChip(selected = showM, onClick = { showM = !showM }, label = { Text("MHV") })
+                FilterChip(selected = showR, onClick = { showR = !showR }, label = { Text("Re-entry") })
+                FilterChip(selected = showCs, onClick = { showCs = !showCs }, label = { Text("CS") })
+                FilterChip(selected = showLiq, onClick = { showLiq = !showLiq }, label = { Text("Liquidité") })
             }
 
             Canvas(
@@ -386,6 +594,25 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                     }
                 }
 
+                // Liquidité : hauts/bas égaux et niveaux non touchés
+                if (showLiq) {
+                    for (ln in d.liq) {
+                        if (ln.price < lo || ln.price > hi) continue
+                        if (ln.fromIdx >= end) continue
+                        val x0 = if (ln.fromIdx < start) 0f else x(ln.fromIdx)
+                        val lc = if (ln.high) Color(0xFFFF8A65) else Color(0xFF4DD0E1)
+                        drawLine(
+                            lc,
+                            Offset(x0, y(ln.price)),
+                            Offset(plotW, y(ln.price)),
+                            strokeWidth = 2f,
+                            pathEffect = PathEffect.dashPathEffect(floatArrayOf(3f, 7f))
+                        )
+                        val lay = tm.measure(ln.label, TextStyle(color = lc, fontSize = 9.sp))
+                        drawText(lay, topLeft = Offset(x0 + 4f, y(ln.price) - lay.size.height - 2f))
+                    }
+                }
+
                 // Quadrillage léger
                 for (q in 1..4) {
                     val p = lo + (hi - lo) * q / 5.0
@@ -447,6 +674,51 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                     )
                 }
 
+                // Marques BBMA et sweeps, empilées sous (haussier) ou au-dessus (baissier) de la bougie
+                fun kindOn(kind: Char): Boolean = when (kind) {
+                    'E' -> showE
+                    'M' -> showM
+                    'R' -> showR
+                    '1', '2', '3' -> showCs
+                    'S' -> showLiq
+                    else -> false
+                }
+                val slots = HashMap<Int, Int>()
+                for (mk in d.marks) {
+                    if (mk.idx < start || mk.idx >= end) continue
+                    if (!kindOn(mk.kind)) continue
+                    val key = mk.idx * 2 + (if (mk.buy) 1 else 0)
+                    val slot = slots[key] ?: 0
+                    slots[key] = slot + 1
+                    val cx = x(mk.idx)
+                    val cd = d.c[mk.idx]
+                    val yy = if (mk.buy) y(cd.low) + 12f + slot * 22f else y(cd.high) - 12f - slot * 22f
+                    if (mk.kind == '1' || mk.kind == '2' || mk.kind == '3') {
+                        val dc = when (mk.kind) {
+                            '1' -> Color(0xFFE040FB)
+                            '2' -> Color(0xFFFFA726)
+                            else -> Color(0xFFB0BEC5)
+                        }
+                        val rad = when (mk.kind) {
+                            '1' -> 7f
+                            '2' -> 5.5f
+                            else -> 4f
+                        }
+                        drawCircle(dc, radius = rad, center = Offset(cx, yy))
+                    } else {
+                        val txt = mk.kind.toString()
+                        val tc = if (mk.kind == 'S') Color(0xFFFF80AB) else if (mk.buy) green else red
+                        val lay = tm.measure(
+                            txt,
+                            TextStyle(color = tc, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        )
+                        drawText(
+                            lay,
+                            topLeft = Offset(cx - lay.size.width / 2f, yy - lay.size.height / 2f)
+                        )
+                    }
+                }
+
                 // Niveaux du signal
                 val dash = PathEffect.dashPathEffect(floatArrayOf(14f, 10f))
                 fun hline(p: Double, color: Color) {
@@ -458,7 +730,7 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                 if (tp1P != null) hline(tp1P, green)
                 if (tp2P != null) hline(tp2P, tealTp2)
 
-                // Flèche sur la bougie du signal (plus grande)
+                // Flèche sur la bougie du signal
                 if (buy != null) {
                     val idx = d.c.indexOfFirst { it.time == spec.time }
                     if (idx in start until end) {
@@ -519,9 +791,9 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                 }
             }
 
-            val marks = d.marks
-            if (marks != null) {
-                Text(marks, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary)
+            val bbmaLine = d.bbmaLine
+            if (bbmaLine != null) {
+                Text(bbmaLine, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary)
             }
 
             var legend = ""
@@ -529,6 +801,15 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
             if (showMa) legend += "MA5 (orange) et MA10 (jaune) · "
             if (showEma) legend += "EMA50 (violet) · "
             if (showZones) legend += "Zones : vert = demande/discount, rouge = offre/premium, pointillés gris = niveaux · "
+            if (showE || showM || showR) {
+                legend += "Lettres : "
+                if (showE) legend += "E = Extrême  "
+                if (showM) legend += "M = MHV  "
+                if (showR) legend += "R = Re-entry  "
+                legend += "(vert sous la bougie = haussier, rouge au-dessus = baissier) · "
+            }
+            if (showCs) legend += "Points CS : CSM (magenta, gros), CSAK (orange), CSA (gris, petit) · "
+            if (showLiq) legend += "Liquidité : EQH/EQL = hauts/bas égaux, Liq. haute/basse = niveaux non touchés, S = sweep · "
             if (legend.isNotEmpty()) {
                 Text(legend.removeSuffix(" · "), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
@@ -547,7 +828,9 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
             Text(
                 "Fais glisser le graphique vers la droite pour remonter dans le temps. " +
                     "Le point blanc marque le prix actuel" +
-                    (if (buy != null) ", la flèche la bougie du signal." else "."),
+                    (if (buy != null) ", la flèche la bougie du signal." else ".") +
+                    " Les marques BBMA et les sweeps ne concernent que les bougies terminées. " +
+                    "Si c'est trop chargé, fais Zoom + ou active un bouton à la fois.",
                 fontSize = 11.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(bottom = 12.dp)
