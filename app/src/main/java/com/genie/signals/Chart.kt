@@ -46,7 +46,7 @@ import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 
-/** Ce qu'il faut pour dessiner un graphique : celui d'un signal, d'une ligne du journal ou d'un marché libre. */
+/** Ce qu'il faut pour dessiner un graphique : celui d'un signal, d'une ligne du journal, d'un marché libre ou d'une entrée en attente. */
 class ChartSpec(
     val name: String,
     val code: String,
@@ -59,7 +59,9 @@ class ChartSpec(
     val tp2: Double?,
     val time: Long,
     val decimals: Int,
-    val setup: String
+    val setup: String,
+    val zoneLow: Double? = null,
+    val zoneHigh: Double? = null
 )
 
 fun chartSpecOf(s: Signal) = ChartSpec(
@@ -71,6 +73,16 @@ fun chartSpecOf(e: JEntry) = ChartSpec(
     e.market, e.code, e.tf, e.tfSeconds, e.buy,
     e.entry, e.sl, e.tp1, null, e.time, e.decimals, e.setup
 )
+
+fun chartSpecOf(p: PendingEntry): ChartSpec {
+    val lv = p.level
+    return ChartSpec(
+        p.market.name, p.market.code, p.tf.label, p.tf.seconds, lv.buy,
+        lv.entry, lv.sl, lv.tp1, lv.tp2, 0L, p.market.decimals,
+        lv.kind + " (entrée limite " + (if (lv.buy) "achat" else "vente") + ")",
+        lv.zoneLow, lv.zoneHigh
+    )
+}
 
 /** Graphique libre d'un marché, sans signal. */
 fun plainChartSpec(m: Market, tf: Tf) = ChartSpec(
@@ -105,7 +117,8 @@ private class ChartData(
     val pdLow: Double,
     val bbmaLine: String?,
     val marks: List<Mark>,
-    val liq: List<LiqLine>
+    val liq: List<LiqLine>,
+    val entries: List<EntryLevel>
 )
 
 private fun fmtPrice(v: Double, d: Int): String =
@@ -396,10 +409,16 @@ private fun buildData(c: List<Candle>): ChartData {
     } catch (e: Exception) {
         // liquidité indisponible
     }
+    var ents: List<EntryLevel> = emptyList()
+    try {
+        ents = Entries.compute(c)
+    } catch (e: Exception) {
+        // entrées indisponibles
+    }
 
     return ChartData(
         c, upA, midA, lowA, m5h, m5l, m10h, m10l, e50A,
-        zones, chartLevels(c, atr), pdHigh, pdLow, marksLine(c), marks, liq
+        zones, chartLevels(c, atr), pdHigh, pdLow, marksLine(c), marks, liq, ents
     )
 }
 
@@ -416,6 +435,7 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
     var showR by remember { mutableStateOf(false) }
     var showCs by remember { mutableStateOf(false) }
     var showLiq by remember { mutableStateOf(false) }
+    var showEntries by remember { mutableStateOf(false) }
     var visible by remember { mutableStateOf(80) }
     var shift by remember { mutableStateOf(0f) }
     val tm = rememberTextMeasurer()
@@ -438,6 +458,7 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
     val green = Color(0xFF26A69A)
     val red = Color(0xFFEF5350)
     val tealTp2 = Color(0xFF80CBC4)
+    val entryBlue = Color(0xFF29B6F6)
     val buy = spec.buy
     val sideColor = if (buy == null) Color.Gray else if (buy) green else red
 
@@ -481,6 +502,7 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                 modifier = Modifier.horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
+                FilterChip(selected = showEntries, onClick = { showEntries = !showEntries }, label = { Text("Entrées") })
                 FilterChip(selected = showBb, onClick = { showBb = !showBb }, label = { Text("Bollinger") })
                 FilterChip(selected = showMa, onClick = { showMa = !showMa }, label = { Text("MA5/10") })
                 FilterChip(selected = showEma, onClick = { showEma = !showEma }, label = { Text("EMA50") })
@@ -520,6 +542,9 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                 val slP = spec.sl
                 val tp1P = spec.tp1
                 val tp2P = spec.tp2
+                val zl = spec.zoneLow
+                val zh = spec.zoneHigh
+                val ents: List<EntryLevel> = if (showEntries) d.entries else emptyList()
 
                 var hi = Double.NEGATIVE_INFINITY
                 var lo = Double.POSITIVE_INFINITY
@@ -530,6 +555,16 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                 for (p in listOfNotNull(entry, slP, tp1P, tp2P)) {
                     hi = max(hi, p)
                     lo = min(lo, p)
+                }
+                if (zl != null && zh != null) {
+                    hi = max(hi, zh)
+                    lo = min(lo, zl)
+                }
+                for (lv in ents) {
+                    for (p in listOf(lv.entry, lv.sl, lv.tp1)) {
+                        hi = max(hi, p)
+                        lo = min(lo, p)
+                    }
                 }
                 val pad = (hi - lo) * 0.05
                 hi += pad
@@ -551,6 +586,16 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                         size = Size(labelW, hh)
                     )
                     drawText(layout, topLeft = Offset(plotW + 4f, yy - hh / 2f))
+                }
+
+                // Zone de l'entrée en attente ouverte depuis la liste
+                if (zl != null && zh != null) {
+                    val zc = if (buy == true) green else red
+                    drawRect(
+                        zc.copy(alpha = 0.20f),
+                        topLeft = Offset(0f, y(zh)),
+                        size = Size(plotW, max(y(zl) - y(zh), 2f))
+                    )
                 }
 
                 // Zones : Premium / Discount, Supply & Demand, SMC, niveaux
@@ -590,6 +635,25 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                                 strokeWidth = 1.5f,
                                 pathEffect = PathEffect.dashPathEffect(floatArrayOf(4f, 8f))
                             )
+                        }
+                    }
+                }
+
+                // Entrées en attente : zone, entrée limite, stop et cibles
+                if (ents.isNotEmpty()) {
+                    val dsh = PathEffect.dashPathEffect(floatArrayOf(10f, 8f))
+                    for (lv in ents) {
+                        val zc = if (lv.buy) green else red
+                        drawRect(
+                            zc.copy(alpha = 0.18f),
+                            topLeft = Offset(0f, y(lv.zoneHigh)),
+                            size = Size(plotW, max(y(lv.zoneLow) - y(lv.zoneHigh), 2f))
+                        )
+                        drawLine(entryBlue, Offset(0f, y(lv.entry)), Offset(plotW, y(lv.entry)), strokeWidth = 2.5f, pathEffect = dsh)
+                        drawLine(red.copy(alpha = 0.8f), Offset(0f, y(lv.sl)), Offset(plotW, y(lv.sl)), strokeWidth = 1.5f, pathEffect = dsh)
+                        drawLine(green.copy(alpha = 0.8f), Offset(0f, y(lv.tp1)), Offset(plotW, y(lv.tp1)), strokeWidth = 1.5f, pathEffect = dsh)
+                        if (lv.tp2 in lo..hi) {
+                            drawLine(tealTp2.copy(alpha = 0.6f), Offset(0f, y(lv.tp2)), Offset(plotW, y(lv.tp2)), strokeWidth = 1.5f, pathEffect = dsh)
                         }
                     }
                 }
@@ -766,6 +830,11 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                     val layout = tm.measure(fmtPrice(p, dec), TextStyle(color = Color(0xFF90A4AE), fontSize = 10.sp))
                     drawText(layout, topLeft = Offset(plotW + 4f, y(p) - layout.size.height / 2f))
                 }
+                for (lv in ents) {
+                    label(lv.tp1, Color.White, Color(0xFF1B5E20))
+                    label(lv.sl, Color.White, Color(0xFFB71C1C))
+                    label(lv.entry, Color.Black, entryBlue)
+                }
                 if (tp2P != null) label(tp2P, Color.Black, tealTp2)
                 if (tp1P != null) label(tp1P, Color.Black, green)
                 if (slP != null) label(slP, Color.White, red)
@@ -791,12 +860,42 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                 }
             }
 
+            // Détail des entrées en attente de ce marché
+            if (showEntries) {
+                if (d.entries.isEmpty()) {
+                    Text(
+                        "Aucune entrée en attente pour ce marché dans ce timeframe.",
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                for (lv in d.entries) {
+                    val col = if (lv.buy) green else red
+                    Text(
+                        (if (lv.buy) "Achat limite " else "Vente limite ") + fmtPrice(lv.entry, dec) +
+                            " · SL " + fmtPrice(lv.sl, dec) +
+                            " · TP1 " + fmtPrice(lv.tp1, dec) +
+                            " · TP2 " + fmtPrice(lv.tp2, dec),
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = col
+                    )
+                    Text(
+                        "Zone " + lv.kind + " · à " + String.format(Locale.US, "%.1f", lv.distAtr) +
+                            " ATR du prix · formée il y a " + lv.ago + " bougies",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
             val bbmaLine = d.bbmaLine
             if (bbmaLine != null) {
                 Text(bbmaLine, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary)
             }
 
             var legend = ""
+            if (showEntries) legend += "Entrées : zones colorées, ligne bleue = entrée limite, rouge = SL, verte = TP1 · "
             if (showBb) legend += "Bollinger (bleu) · "
             if (showMa) legend += "MA5 (orange) et MA10 (jaune) · "
             if (showEma) legend += "EMA50 (violet) · "
@@ -828,7 +927,7 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
             Text(
                 "Fais glisser le graphique vers la droite pour remonter dans le temps. " +
                     "Le point blanc marque le prix actuel" +
-                    (if (buy != null) ", la flèche la bougie du signal." else ".") +
+                    (if (buy != null && spec.time != 0L) ", la flèche la bougie du signal." else ".") +
                     " Les marques BBMA et les sweeps ne concernent que les bougies terminées. " +
                     "Si c'est trop chargé, fais Zoom + ou active un bouton à la fois.",
                 fontSize = 11.sp,
