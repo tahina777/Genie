@@ -224,6 +224,7 @@ fun GenieApp(vm: MainVm) {
     var alerts by remember { mutableStateOf(Alerts.isOn(ctx)) }
     var screen by remember { mutableStateOf(0) }
     var chart by remember { mutableStateOf<ChartSpec?>(null) }
+    var showFar by remember { mutableStateOf(false) }
     var capText by remember {
         mutableStateOf(LotCalc.capital(ctx).let { if (it > 0) numText(it) else "" })
     }
@@ -412,15 +413,25 @@ fun GenieApp(vm: MainVm) {
                             item { BtCard(bt, btLabel) }
                         }
                         if (entries.isNotEmpty()) {
+                            val near = entries.filter { it.level.distAtr <= 2.0 }
+                            val shownEntries = if (showFar) entries else near
                             item {
-                                Text(
-                                    "Entrées en attente : ordres limites à surveiller, ce ne sont pas des signaux validés.",
-                                    fontSize = 13.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.primary
-                                )
+                                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Text(
+                                        "Entrées en attente : ordres limites à surveiller, pas des signaux validés. " +
+                                            near.size + " proche(s) (2 ATR au plus) sur " + entries.size + ".",
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                    FilterChip(
+                                        selected = showFar,
+                                        onClick = { showFar = !showFar },
+                                        label = { Text("Inclure les entrées lointaines (jusqu'à 6 ATR)") }
+                                    )
+                                }
                             }
-                            items(entries) { p ->
+                            items(shownEntries) { p ->
                                 EntryCard(
                                     p,
                                     LotCalc.describe(p.toSignal(), capital, riskPct),
@@ -645,6 +656,11 @@ fun EntryCard(p: PendingEntry, lot: String, onClick: () -> Unit) {
     val lv = p.level
     val m = p.market
     val col = if (lv.buy) Color(0xFF26A69A) else Color(0xFFEF5350)
+    val trendColor = when {
+        lv.trend >= 1 -> Color(0xFF26A69A)
+        lv.trend == 0 -> Color(0xFF90A4AE)
+        else -> Color(0xFFFFB74D)
+    }
     fun f(v: Double): String = String.format(Locale.US, "%." + m.decimals + "f", v)
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -674,6 +690,12 @@ fun EntryCard(p: PendingEntry, lot: String, onClick: () -> Unit) {
                 p.tf.label + " · " + lv.kind + " · formée il y a " + lv.ago + " bougies",
                 fontSize = 13.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Text(
+                lv.trendLabel,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = trendColor
             )
             LevelRow("Entrée limite", f(lv.entry), Color(0xFF29B6F6))
             LevelRow("Stop Loss", f(lv.sl), Color(0xFFEF5350))
