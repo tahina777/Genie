@@ -10,7 +10,21 @@ import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 
-/** Une entrée limite : zone, prix d'entrée au bord de la zone, stop et cibles. */
+/** Timeframe supérieur utilisé pour juger la tendance d'une entrée. */
+object Htf {
+    fun seconds(s: Int): Int? = when {
+        s <= 300 -> 3600
+        s <= 900 -> 14400
+        s <= 3600 -> 14400
+        s <= 14400 -> 86400
+        else -> null
+    }
+}
+
+/**
+ * Une entrée limite : zone, prix d'entrée au bord de la zone, stop et cibles.
+ * trend : de -2 (contre la tendance sur l'EMA50 et le timeframe supérieur) à +2 (dans le sens des deux).
+ */
 class EntryLevel(
     val buy: Boolean,
     val kind: String,
@@ -22,8 +36,17 @@ class EntryLevel(
     val tp2: Double,
     val dist: Double,
     val distAtr: Double,
-    val ago: Int
-)
+    val ago: Int,
+    val trend: Int
+) {
+    val trendLabel: String
+        get() = when {
+            trend >= 2 -> "Dans le sens de la tendance (EMA50 et timeframe supérieur)"
+            trend == 1 -> "Plutôt dans le sens de la tendance"
+            trend == 0 -> "Tendance neutre"
+            else -> "Contre-tendance"
+        }
+}
 
 class PendingEntry(
     val market: Market,
@@ -56,13 +79,14 @@ private class Cand(
  * Entrées en attente (ordres limites) : zones fraîches, jamais touchées, autour du prix actuel.
  * Types : Demande / Offre (bougie de base puis impulsion), Order block, FVG non comblé.
  * Pour chaque côté, on garde la zone la plus proche du prix (à 6 ATR au plus).
+ * Les entrées contre la tendance passent après les autres.
  */
 object Entries {
     private const val LOOKBACK = 150
     private const val MAX_DIST_ATR = 6.0
 
-    /** `all` contient les bougies, la dernière étant encore en formation. */
-    fun compute(all: List<Candle>): List<EntryLevel> {
+    /** `all` contient les bougies, la dernière étant encore en formation. `htf` : timeframe supérieur. */
+    fun compute(all: List<Candle>, htf: List<Candle>? = null): List<EntryLevel> {
         val n = all.size
         if (n < 60) return emptyList()
         val closedN = n - 1
@@ -70,6 +94,22 @@ object Entries {
         val atr = Ind.atr(closed)
         if (atr <= 0.0) return emptyList()
         val price = all[n - 1].close
+
+        val ownT = try {
+            BbmaCalc(closed).trend()
+        } catch (e: Exception) {
+            0
+        }
+        val htfT = if (htf != null && htf.size >= 100) {
+            try {
+                BbmaCalc(htf.dropLast(1)).trend()
+            } catch (e: Exception) {
+                0
+            }
+        } else {
+            0
+        }
+
         val cands = ArrayList<Cand>()
 
         // Demande / Offre et Order block : bougie suivie d'une impulsion d'au moins 1,5 ATR
@@ -146,11 +186,16 @@ object Entries {
             val dist = abs(price - entry)
             if (dist / atr > MAX_DIST_ATR) continue
 
+            val wanted = if (cd.buy) 1 else -1
+            var tr = 0
+            if (ownT == wanted) tr++ else if (ownT == -wanted) tr--
+            if (htfT == wanted) tr++ else if (htfT == -wanted) tr--
+
             val sign = if (cd.buy) 1.0 else -1.0
             val lvl = EntryLevel(
                 cd.buy, cd.kind, cd.low, cd.high, entry, sl,
                 entry + sign * 1.5 * risk, entry + sign * 2.5 * risk,
-                dist, dist / atr, closedN - cd.idx
+                dist, dist / atr, closedN - cd.idx, tr
             )
             if (cd.buy) {
                 val cur = bestBuy
@@ -160,7 +205,8 @@ object Entries {
                 if (cur == null || lvl.dist < cur.dist) bestSell = lvl
             }
         }
-        return listOfNotNull(bestBuy, bestSell).sortedBy { it.dist }
+        return listOfNotNull(bestBuy, bestSell)
+            .sortedWith(compareBy<EntryLevel>({ it.trend < 0 }, { it.dist }))
     }
 
     suspend fun scan(markets: List<Market>, tf: Tf): List<PendingEntry> = coroutineScope {
@@ -170,13 +216,21 @@ object Entries {
                 gate.withPermit {
                     try {
                         val all = Deriv.candles(m.code, tf.seconds, 300)
+                        val hs = Htf.seconds(tf.seconds)
+                        val htf = if (hs == null) null else try {
+                            Deriv.candles(m.code, hs, 300)
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            null
+                        }
                         val last = all.lastOrNull()
                         val now = System.currentTimeMillis() / 1000
                         val out: List<PendingEntry> =
                             if (last == null || all.size < 100 || now - last.time > tf.seconds * 4L) {
                                 emptyList()
                             } else {
-                                compute(all).map { PendingEntry(m, tf, it, last.close, last.time) }
+                                compute(all, htf).map { PendingEntry(m, tf, it, last.close, last.time) }
                             }
                         out
                     } catch (e: CancellationException) {
@@ -186,6 +240,7 @@ object Entries {
                     }
                 }
             }
-        }.awaitAll().flatten().sortedBy { it.level.distAtr }
+        }.awaitAll().flatten()
+            .sortedWith(compareBy<PendingEntry>({ it.level.trend < 0 }, { it.level.distAtr }))
     }
 }
