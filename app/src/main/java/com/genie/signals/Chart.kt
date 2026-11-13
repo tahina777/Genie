@@ -93,13 +93,16 @@ fun plainChartSpec(m: Market, tf: Tf) = ChartSpec(
 private class ChartZone(val low: Double, val high: Double, val buy: Boolean)
 
 /**
- * Marque sur une bougie. kind : E = Extrême, M = MHV, R = Re-entry,
- * 1 = CSM, 2 = CSAK, 3 = CSA, S = sweep de liquidité.
+ * Marque sur une bougie. kind :
+ * E = Extrême, M = MHV, R = Re-entry, 1 = CSM, 2 = CSAK, 3 = CSA, S = sweep de liquidité,
+ * G = Engulfing, P = Pin bar, D = Doji, I = Inside bar, T = Étoile du matin/soir, W = Double sommet/creux.
  * buy = true : marque haussière, dessinée sous la bougie ; false : au-dessus.
  */
 private class Mark(val idx: Int, val kind: Char, val buy: Boolean)
 
 private class LiqLine(val price: Double, val fromIdx: Int, val label: String, val high: Boolean)
+
+private class PatLine(val i1: Int, val p1: Double, val i2: Int, val p2: Double, val buy: Boolean)
 
 private class ChartData(
     val c: List<Candle>,
@@ -118,11 +121,23 @@ private class ChartData(
     val bbmaLine: String?,
     val marks: List<Mark>,
     val liq: List<LiqLine>,
-    val entries: List<EntryLevel>
+    val entries: List<EntryLevel>,
+    val patLines: List<PatLine>
 )
 
 private fun fmtPrice(v: Double, d: Int): String =
     String.format(Locale.US, "%." + d + "f", v)
+
+/** Texte affiché sur la bougie pour les marques en lettres. */
+private fun markText(kind: Char, buy: Boolean): String = when (kind) {
+    'G' -> "EN"
+    'P' -> "PB"
+    'D' -> "DJ"
+    'I' -> "IB"
+    'T' -> "ST"
+    'W' -> if (buy) "DC" else "DS"
+    else -> kind.toString()
+}
 
 /** Points hauts/bas respectés au moins 2 fois, regroupés par proximité. */
 private fun chartLevels(c: List<Candle>, atr: Double): List<Double> {
@@ -253,6 +268,114 @@ private fun buildBbmaMarks(
     return out
 }
 
+/**
+ * Patterns de chandeliers et double sommet / creux, sur les bougies terminées.
+ * Les patterns de retournement ne comptent qu'après un mouvement de 5 bougies dans le sens inverse.
+ * Affichage seulement : ils ne changent pas le score des signaux.
+ */
+private fun buildPatterns(c: List<Candle>, atr: Double): Pair<List<Mark>, List<PatLine>> {
+    val marks = ArrayList<Mark>()
+    val lines = ArrayList<PatLine>()
+    val n = c.size
+    if (atr <= 0.0 || n < 30) return Pair(marks, lines)
+
+    for (i in 8 until n - 1) {
+        val cur = c[i]
+        val prev = c[i - 1]
+        val body = abs(cur.close - cur.open)
+        val range = cur.high - cur.low
+        val pBody = abs(prev.close - prev.open)
+        val down = prev.close < c[i - 6].close
+        val up = prev.close > c[i - 6].close
+
+        // Engulfing : le corps avale le corps précédent
+        if (body >= 0.3 * atr && body > pBody) {
+            if (down && prev.close < prev.open && cur.close > cur.open &&
+                cur.open <= prev.close && cur.close >= prev.open
+            ) {
+                marks.add(Mark(i, 'G', true))
+            }
+            if (up && prev.close > prev.open && cur.close < cur.open &&
+                cur.open >= prev.close && cur.close <= prev.open
+            ) {
+                marks.add(Mark(i, 'G', false))
+            }
+        }
+
+        // Pin bar : marteau (mèche basse) ou étoile filante (mèche haute)
+        if (range >= 0.5 * atr) {
+            val upper = cur.high - max(cur.open, cur.close)
+            val lower = min(cur.open, cur.close) - cur.low
+            if (down && lower >= 2 * body && lower >= 0.6 * range) marks.add(Mark(i, 'P', true))
+            if (up && upper >= 2 * body && upper >= 0.6 * range) marks.add(Mark(i, 'P', false))
+        }
+
+        // Doji : corps minuscule
+        if (range >= 0.5 * atr && body <= 0.1 * range) marks.add(Mark(i, 'D', false))
+
+        // Inside bar : la bougie reste dans celle d'avant
+        if ((prev.high - prev.low) >= 0.8 * atr && cur.high < prev.high && cur.low > prev.low) {
+            marks.add(Mark(i, 'I', false))
+        }
+
+        // Étoile du matin / du soir : bougies i-2, i-1 et i
+        val a = c[i - 2]
+        val aBody = abs(a.close - a.open)
+        val aMid = (a.open + a.close) / 2.0
+        val pMid = (prev.open + prev.close) / 2.0
+        if (aBody >= 0.6 * atr && pBody <= 0.35 * aBody) {
+            if (a.close < c[i - 7].close && a.close < a.open && pMid < a.close &&
+                cur.close > cur.open && cur.close > aMid
+            ) {
+                marks.add(Mark(i, 'T', true))
+            }
+            if (a.close > c[i - 7].close && a.close > a.open && pMid > a.close &&
+                cur.close < cur.open && cur.close < aMid
+            ) {
+                marks.add(Mark(i, 'T', false))
+            }
+        }
+    }
+
+    // Double sommet / double creux : deux pivots consécutifs au même niveau
+    val k = 3
+    val ph = ArrayList<Int>()
+    val pl = ArrayList<Int>()
+    for (i in k until n - k) {
+        var isH = true
+        var isL = true
+        for (d in 1..k) {
+            if (c[i].high <= c[i - d].high || c[i].high <= c[i + d].high) isH = false
+            if (c[i].low >= c[i - d].low || c[i].low >= c[i + d].low) isL = false
+        }
+        if (isH) ph.add(i)
+        if (isL) pl.add(i)
+    }
+    for (a in 0 until ph.size - 1) {
+        val i1 = ph[a]
+        val i2 = ph[a + 1]
+        if (i2 - i1 < 5 || i2 - i1 > 60) continue
+        if (abs(c[i1].high - c[i2].high) > 0.3 * atr) continue
+        var trough = Double.MAX_VALUE
+        for (j in i1..i2) trough = min(trough, c[j].low)
+        if (min(c[i1].high, c[i2].high) - trough < atr) continue
+        marks.add(Mark(i2, 'W', false))
+        lines.add(PatLine(i1, c[i1].high, i2, c[i2].high, false))
+    }
+    for (a in 0 until pl.size - 1) {
+        val i1 = pl[a]
+        val i2 = pl[a + 1]
+        if (i2 - i1 < 5 || i2 - i1 > 60) continue
+        if (abs(c[i1].low - c[i2].low) > 0.3 * atr) continue
+        var peak = -Double.MAX_VALUE
+        for (j in i1..i2) peak = max(peak, c[j].high)
+        if (peak - max(c[i1].low, c[i2].low) < atr) continue
+        marks.add(Mark(i2, 'W', true))
+        lines.add(PatLine(i1, c[i1].low, i2, c[i2].low, true))
+    }
+    return Pair(marks, lines)
+}
+
 /** Regroupe des points proches ; renvoie (indice du premier point, prix moyen) pour les groupes d'au moins 2. */
 private fun clusterLines(pts: List<Pair<Int, Double>>, tol: Double): List<Pair<Int, Double>> {
     val sorted = pts.sortedBy { it.second }
@@ -352,7 +475,7 @@ private fun buildLiquidity(c: List<Candle>, atr: Double): Pair<List<LiqLine>, Li
     return Pair(lines, marks)
 }
 
-private fun buildData(c: List<Candle>): ChartData {
+private fun buildData(c: List<Candle>, htf: List<Candle>?): ChartData {
     val n = c.size
     val closes = DoubleArray(n) { c[it].close }
     val highs = DoubleArray(n) { c[it].high }
@@ -409,16 +532,24 @@ private fun buildData(c: List<Candle>): ChartData {
     } catch (e: Exception) {
         // liquidité indisponible
     }
+    var patLines: List<PatLine> = emptyList()
+    try {
+        val res = buildPatterns(c, atr)
+        marks.addAll(res.first)
+        patLines = res.second
+    } catch (e: Exception) {
+        // patterns indisponibles
+    }
     var ents: List<EntryLevel> = emptyList()
     try {
-        ents = Entries.compute(c)
+        ents = Entries.compute(c, htf)
     } catch (e: Exception) {
         // entrées indisponibles
     }
 
     return ChartData(
         c, upA, midA, lowA, m5h, m5l, m10h, m10l, e50A,
-        zones, chartLevels(c, atr), pdHigh, pdLow, marksLine(c), marks, liq, ents
+        zones, chartLevels(c, atr), pdHigh, pdLow, marksLine(c), marks, liq, ents, patLines
     )
 }
 
@@ -430,12 +561,20 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
     var showMa by remember { mutableStateOf(true) }
     var showEma by remember { mutableStateOf(false) }
     var showZones by remember { mutableStateOf(false) }
+    var showLiq by remember { mutableStateOf(false) }
+    var showEntries by remember { mutableStateOf(false) }
+    var showFar by remember { mutableStateOf(false) }
     var showE by remember { mutableStateOf(false) }
     var showM by remember { mutableStateOf(false) }
     var showR by remember { mutableStateOf(false) }
     var showCs by remember { mutableStateOf(false) }
-    var showLiq by remember { mutableStateOf(false) }
-    var showEntries by remember { mutableStateOf(false) }
+    var showCsa by remember { mutableStateOf(false) }
+    var showEng by remember { mutableStateOf(false) }
+    var showPin by remember { mutableStateOf(false) }
+    var showDoji by remember { mutableStateOf(false) }
+    var showInside by remember { mutableStateOf(false) }
+    var showStar by remember { mutableStateOf(false) }
+    var showDouble by remember { mutableStateOf(false) }
     var visible by remember { mutableStateOf(80) }
     var shift by remember { mutableStateOf(0f) }
     val tm = rememberTextMeasurer()
@@ -446,7 +585,15 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
             if (raw.size < 60) {
                 error = "Pas assez de bougies pour dessiner le graphique."
             } else {
-                data = withContext(Dispatchers.Default) { buildData(raw) }
+                val hs = Htf.seconds(spec.tfSeconds)
+                val htf = if (hs == null) null else try {
+                    Deriv.candles(spec.code, hs, 300)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    null
+                }
+                data = withContext(Dispatchers.Default) { buildData(raw, htf) }
             }
         } catch (e: CancellationException) {
             throw e
@@ -459,6 +606,7 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
     val red = Color(0xFFEF5350)
     val tealTp2 = Color(0xFF80CBC4)
     val entryBlue = Color(0xFF29B6F6)
+    val neutralGray = Color(0xFFB0BEC5)
     val buy = spec.buy
     val sideColor = if (buy == null) Color.Gray else if (buy) green else red
 
@@ -498,21 +646,46 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                 LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
             }
         } else {
+            // Rangée 1 : entrées, indicateurs, zones, liquidité
             Row(
                 modifier = Modifier.horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 FilterChip(selected = showEntries, onClick = { showEntries = !showEntries }, label = { Text("Entrées") })
+                FilterChip(selected = showFar, onClick = { showFar = !showFar }, label = { Text("Lointaines") })
                 FilterChip(selected = showBb, onClick = { showBb = !showBb }, label = { Text("Bollinger") })
                 FilterChip(selected = showMa, onClick = { showMa = !showMa }, label = { Text("MA5/10") })
                 FilterChip(selected = showEma, onClick = { showEma = !showEma }, label = { Text("EMA50") })
                 FilterChip(selected = showZones, onClick = { showZones = !showZones }, label = { Text("Zones") })
+                FilterChip(selected = showLiq, onClick = { showLiq = !showLiq }, label = { Text("Liquidité") })
+            }
+            // Rangée 2 : repères BBMA
+            Row(
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
                 FilterChip(selected = showE, onClick = { showE = !showE }, label = { Text("Extrême") })
                 FilterChip(selected = showM, onClick = { showM = !showM }, label = { Text("MHV") })
                 FilterChip(selected = showR, onClick = { showR = !showR }, label = { Text("Re-entry") })
-                FilterChip(selected = showCs, onClick = { showCs = !showCs }, label = { Text("CS") })
-                FilterChip(selected = showLiq, onClick = { showLiq = !showLiq }, label = { Text("Liquidité") })
+                FilterChip(selected = showCs, onClick = { showCs = !showCs }, label = { Text("CSM/CSAK") })
+                FilterChip(selected = showCsa, onClick = { showCsa = !showCsa }, label = { Text("CSA") })
             }
+            // Rangée 3 : patterns
+            Row(
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                FilterChip(selected = showEng, onClick = { showEng = !showEng }, label = { Text("Engulfing") })
+                FilterChip(selected = showPin, onClick = { showPin = !showPin }, label = { Text("Pin bar") })
+                FilterChip(selected = showDoji, onClick = { showDoji = !showDoji }, label = { Text("Doji") })
+                FilterChip(selected = showInside, onClick = { showInside = !showInside }, label = { Text("Inside bar") })
+                FilterChip(selected = showStar, onClick = { showStar = !showStar }, label = { Text("Étoile") })
+                FilterChip(selected = showDouble, onClick = { showDouble = !showDouble }, label = { Text("Double top/bottom") })
+            }
+
+            // Entrées affichées : proches (2 ATR au plus) sauf si « Lointaines » est actif
+            val shownEntries: List<EntryLevel> =
+                if (showEntries) d.entries.filter { showFar || it.distAtr <= 2.0 } else emptyList()
 
             Canvas(
                 modifier = Modifier
@@ -537,6 +710,7 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                 val start = max(0, end - vis)
                 val cw = plotW / vis
                 val dec = spec.decimals
+                val lastC = d.c.last()
 
                 val entry = spec.entry
                 val slP = spec.sl
@@ -544,7 +718,7 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                 val tp2P = spec.tp2
                 val zl = spec.zoneLow
                 val zh = spec.zoneHigh
-                val ents: List<EntryLevel> = if (showEntries) d.entries else emptyList()
+                val ents = shownEntries
 
                 var hi = Double.NEGATIVE_INFINITY
                 var lo = Double.POSITIVE_INFINITY
@@ -573,6 +747,20 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
 
                 fun y(p: Double): Float = (h - ((p - lo) / (hi - lo)) * h).toFloat()
                 fun x(j: Int): Float = (j - start + 0.5f) * cw
+
+                // Prix des étiquettes colorées : les graduations trop proches seront masquées
+                val specials = ArrayList<Double>()
+                specials.add(lastC.close)
+                if (entry != null) specials.add(entry)
+                if (slP != null) specials.add(slP)
+                if (tp1P != null) specials.add(tp1P)
+                if (tp2P != null) specials.add(tp2P)
+                for (lv in ents) {
+                    specials.add(lv.entry)
+                    specials.add(lv.sl)
+                    specials.add(lv.tp1)
+                    specials.add(lv.tp2)
+                }
 
                 // Étiquette de prix dans la marge de droite
                 fun label(p: Double, textColor: Color, fill: Color) {
@@ -658,7 +846,7 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                     }
                 }
 
-                // Liquidité : hauts/bas égaux et niveaux non touchés
+                // Liquidité : hauts/bas égaux et niveaux non touchés, avec fond lisible
                 if (showLiq) {
                     for (ln in d.liq) {
                         if (ln.price < lo || ln.price > hi) continue
@@ -673,7 +861,13 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                             pathEffect = PathEffect.dashPathEffect(floatArrayOf(3f, 7f))
                         )
                         val lay = tm.measure(ln.label, TextStyle(color = lc, fontSize = 9.sp))
-                        drawText(lay, topLeft = Offset(x0 + 4f, y(ln.price) - lay.size.height - 2f))
+                        val ty = y(ln.price) - lay.size.height - 2f
+                        drawRect(
+                            Color(0xFF0E1117).copy(alpha = 0.8f),
+                            topLeft = Offset(x0 + 2f, ty),
+                            size = Size(lay.size.width.toFloat() + 4f, lay.size.height.toFloat())
+                        )
+                        drawText(lay, topLeft = Offset(x0 + 4f, ty))
                     }
                 }
 
@@ -738,13 +932,34 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                     )
                 }
 
-                // Marques BBMA et sweeps, empilées sous (haussier) ou au-dessus (baissier) de la bougie
+                // Lignes des doubles sommets / creux
+                if (showDouble) {
+                    for (pl in d.patLines) {
+                        if (pl.i2 < start || pl.i1 >= end) continue
+                        drawLine(
+                            if (pl.buy) green else red,
+                            Offset(x(pl.i1), y(pl.p1)),
+                            Offset(x(pl.i2), y(pl.p2)),
+                            strokeWidth = 2f,
+                            pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 6f))
+                        )
+                    }
+                }
+
+                // Marques BBMA, sweeps et patterns, empilées sous (haussier) ou au-dessus (baissier) de la bougie
                 fun kindOn(kind: Char): Boolean = when (kind) {
                     'E' -> showE
                     'M' -> showM
                     'R' -> showR
-                    '1', '2', '3' -> showCs
+                    '1', '2' -> showCs
+                    '3' -> showCsa
                     'S' -> showLiq
+                    'G' -> showEng
+                    'P' -> showPin
+                    'D' -> showDoji
+                    'I' -> showInside
+                    'T' -> showStar
+                    'W' -> showDouble
                     else -> false
                 }
                 val slots = HashMap<Int, Int>()
@@ -770,10 +985,14 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                         }
                         drawCircle(dc, radius = rad, center = Offset(cx, yy))
                     } else {
-                        val txt = mk.kind.toString()
-                        val tc = if (mk.kind == 'S') Color(0xFFFF80AB) else if (mk.buy) green else red
+                        val tc = when {
+                            mk.kind == 'S' -> Color(0xFFFF80AB)
+                            mk.kind == 'D' || mk.kind == 'I' -> neutralGray
+                            mk.buy -> green
+                            else -> red
+                        }
                         val lay = tm.measure(
-                            txt,
+                            markText(mk.kind, mk.buy),
                             TextStyle(color = tc, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                         )
                         drawText(
@@ -818,19 +1037,20 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                 }
 
                 // Prix actuel : point sur la dernière bougie
-                val lastC = d.c.last()
                 if (end == n) {
                     drawCircle(Color.White, radius = 6f, center = Offset(x(n - 1), y(lastC.close)))
                 }
 
-                // Marge de droite : fond, échelle des prix et étiquettes
+                // Marge de droite : fond, graduations (sans chevaucher les étiquettes) et étiquettes
                 drawRect(Color(0xFF0E1117), topLeft = Offset(plotW, 0f), size = Size(labelW, h))
                 for (q in 1..4) {
                     val p = lo + (hi - lo) * q / 5.0
+                    if (specials.any { abs(y(it) - y(p)) < 16f }) continue
                     val layout = tm.measure(fmtPrice(p, dec), TextStyle(color = Color(0xFF90A4AE), fontSize = 10.sp))
                     drawText(layout, topLeft = Offset(plotW + 4f, y(p) - layout.size.height / 2f))
                 }
                 for (lv in ents) {
+                    label(lv.tp2, Color.Black, tealTp2)
                     label(lv.tp1, Color.White, Color(0xFF1B5E20))
                     label(lv.sl, Color.White, Color(0xFFB71C1C))
                     label(lv.entry, Color.Black, entryBlue)
@@ -862,14 +1082,15 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
 
             // Détail des entrées en attente de ce marché
             if (showEntries) {
-                if (d.entries.isEmpty()) {
+                if (shownEntries.isEmpty()) {
                     Text(
-                        "Aucune entrée en attente pour ce marché dans ce timeframe.",
+                        "Aucune entrée proche (2 ATR au plus) pour ce marché. " +
+                            "Active « Lointaines » pour voir les plus éloignées.",
                         fontSize = 13.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                for (lv in d.entries) {
+                for (lv in shownEntries) {
                     val col = if (lv.buy) green else red
                     Text(
                         (if (lv.buy) "Achat limite " else "Vente limite ") + fmtPrice(lv.entry, dec) +
@@ -885,6 +1106,12 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                             " ATR du prix · formée il y a " + lv.ago + " bougies",
                         fontSize = 11.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        lv.trendLabel,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = if (lv.trend >= 1) green else if (lv.trend == 0) neutralGray else Color(0xFFFFB74D)
                     )
                 }
             }
@@ -907,8 +1134,19 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                 if (showR) legend += "R = Re-entry  "
                 legend += "(vert sous la bougie = haussier, rouge au-dessus = baissier) · "
             }
-            if (showCs) legend += "Points CS : CSM (magenta, gros), CSAK (orange), CSA (gris, petit) · "
+            if (showCs) legend += "Points : CSM (magenta, gros), CSAK (orange) · "
+            if (showCsa) legend += "CSA (gris, petit) · "
             if (showLiq) legend += "Liquidité : EQH/EQL = hauts/bas égaux, Liq. haute/basse = niveaux non touchés, S = sweep · "
+            if (showEng || showPin || showDoji || showInside || showStar || showDouble) {
+                legend += "Patterns : "
+                if (showEng) legend += "EN = Engulfing  "
+                if (showPin) legend += "PB = Pin bar (marteau / étoile filante)  "
+                if (showDoji) legend += "DJ = Doji  "
+                if (showInside) legend += "IB = Inside bar  "
+                if (showStar) legend += "ST = Étoile du matin/soir  "
+                if (showDouble) legend += "DC = Double creux, DS = Double sommet  "
+                legend += "(vert sous la bougie = haussier, rouge au-dessus = baissier, gris = neutre) · "
+            }
             if (legend.isNotEmpty()) {
                 Text(legend.removeSuffix(" · "), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
@@ -928,7 +1166,8 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                 "Fais glisser le graphique vers la droite pour remonter dans le temps. " +
                     "Le point blanc marque le prix actuel" +
                     (if (buy != null && spec.time != 0L) ", la flèche la bougie du signal." else ".") +
-                    " Les marques BBMA et les sweeps ne concernent que les bougies terminées. " +
+                    " Les marques et les patterns ne concernent que les bougies terminées. " +
+                    "Les patterns sont informatifs : ils ne changent pas le score des signaux. " +
                     "Si c'est trop chargé, fais Zoom + ou active un bouton à la fois.",
                 fontSize = 11.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
