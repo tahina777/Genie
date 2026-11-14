@@ -90,7 +90,25 @@ fun plainChartSpec(m: Market, tf: Tf) = ChartSpec(
     null, null, null, null, 0L, m.decimals, "Graphique libre"
 )
 
+/** Zone SMC détectée par le moteur. */
 private class ChartZone(val low: Double, val high: Double, val buy: Boolean)
+
+/** Niveau de support ou de résistance : prix et nombre de fois où il a été respecté. */
+private class SrLevel(val price: Double, val touches: Int)
+
+/** Zone de Supply (offre) ou Demand (demande). tested = le prix l'a déjà retouchée sans la casser. */
+private class SdBox(val low: Double, val high: Double, val buy: Boolean, val startIdx: Int, val tested: Boolean)
+
+/** Profil temps/prix à plage fixe : poids de chaque tranche de prix, POC et zone de valeur. */
+private class VpResult(
+    val lo: Double,
+    val step: Double,
+    val weights: DoubleArray,
+    val poc: Int,
+    val vaLow: Int,
+    val vaHigh: Int,
+    val fromIdx: Int
+)
 
 /**
  * Marque sur une bougie. kind :
@@ -115,7 +133,8 @@ private class ChartData(
     val ma10l: DoubleArray,
     val ema50: DoubleArray,
     val zones: List<ChartZone>,
-    val levels: List<Double>,
+    val levels: List<SrLevel>,
+    val sdBoxes: List<SdBox>,
     val pdHigh: Double,
     val pdLow: Double,
     val bbmaLine: String?,
@@ -140,7 +159,7 @@ private fun markText(kind: Char, buy: Boolean): String = when (kind) {
 }
 
 /** Points hauts/bas respectés au moins 2 fois, regroupés par proximité. */
-private fun chartLevels(c: List<Candle>, atr: Double): List<Double> {
+private fun chartLevels(c: List<Candle>, atr: Double): List<SrLevel> {
     if (atr <= 0.0) return emptyList()
     val k = 5
     val pts = ArrayList<Double>()
@@ -155,17 +174,122 @@ private fun chartLevels(c: List<Candle>, atr: Double): List<Double> {
         if (isLow) pts.add(c[i].low)
     }
     pts.sort()
-    val out = ArrayList<Double>()
+    val out = ArrayList<SrLevel>()
     var group = ArrayList<Double>()
     for (p in pts) {
         if (group.isNotEmpty() && p - group.last() > 0.3 * atr) {
-            if (group.size >= 2) out.add(group.average())
+            if (group.size >= 2) out.add(SrLevel(group.average(), group.size))
             group = ArrayList()
         }
         group.add(p)
     }
-    if (group.size >= 2) out.add(group.average())
+    if (group.size >= 2) out.add(SrLevel(group.average(), group.size))
     return out
+}
+
+/**
+ * Zones Supply et Demand : une petite bougie de base suivie d'une impulsion d'au moins 1,5 ATR.
+ * Une zone est supprimée si le prix clôture au-delà (zone cassée). Elle est « testée » si le prix l'a touchée.
+ * On garde les 3 zones de demande et les 3 zones d'offre les plus proches du prix.
+ */
+private fun buildSdBoxes(c: List<Candle>, atr: Double): List<SdBox> {
+    val out = ArrayList<SdBox>()
+    val n = c.size
+    if (atr <= 0.0 || n < 30) return out
+    val cn = n - 1 // nombre de bougies terminées : la dernière (indice cn) est en formation
+    val price = c[n - 1].close
+    for (i in max(2, cn - 200)..(cn - 5)) {
+        val b = c[i]
+        val body = abs(b.close - b.open)
+        val range = b.high - b.low
+        if (!(body <= 0.6 * atr && range <= 1.2 * atr)) continue
+        var hi = Double.NEGATIVE_INFINITY
+        var lo = Double.POSITIVE_INFINITY
+        for (k in (i + 1)..(i + 3)) {
+            hi = max(hi, c[k].high)
+            lo = min(lo, c[k].low)
+        }
+        val up = (hi - b.high) / atr
+        val down = (b.low - lo) / atr
+        val isDemand = up >= 1.5 && c[i + 1].close > b.high && up >= down
+        val isSupply = !isDemand && down >= 1.5 && c[i + 1].close < b.low
+        if (!isDemand && !isSupply) continue
+
+        var broken = false
+        var tested = false
+        for (j in (i + 4)..(n - 1)) {
+            val k = c[j]
+            if (isDemand) {
+                if (j < cn && k.close < b.low) {
+                    broken = true
+                    break
+                }
+                if (k.low <= b.high) tested = true
+            } else {
+                if (j < cn && k.close > b.high) {
+                    broken = true
+                    break
+                }
+                if (k.high >= b.low) tested = true
+            }
+        }
+        if (broken) continue
+        out.add(SdBox(b.low, b.high, isDemand, i, tested))
+    }
+    val demand = out.filter { it.buy }.sortedBy { abs((it.low + it.high) / 2.0 - price) }.take(3)
+    val supply = out.filter { !it.buy }.sortedBy { abs((it.low + it.high) / 2.0 - price) }.take(3)
+    return demand + supply
+}
+
+/**
+ * Profil temps/prix à plage fixe : les `rangeN` dernières bougies terminées.
+ * Chaque bougie ajoute 1 à chaque tranche de prix touchée, et 1 de plus sur son corps.
+ * POC = tranche la plus fréquentée. Zone de valeur = 70 % du total autour du POC.
+ */
+private fun buildVp(c: List<Candle>, rangeN: Int, bins: Int): VpResult? {
+    val n = c.size
+    val cn = n - 1
+    val from = max(0, cn - rangeN)
+    if (cn - from < 20) return null
+    var hi = Double.NEGATIVE_INFINITY
+    var lo = Double.POSITIVE_INFINITY
+    for (j in from until cn) {
+        hi = max(hi, c[j].high)
+        lo = min(lo, c[j].low)
+    }
+    if (hi <= lo) return null
+    val step = (hi - lo) / bins
+    val w = DoubleArray(bins)
+    for (j in from until cn) {
+        val k = c[j]
+        val bLo = ((k.low - lo) / step).toInt().coerceIn(0, bins - 1)
+        val bHi = ((k.high - lo) / step).toInt().coerceIn(0, bins - 1)
+        val bodyLo = ((min(k.open, k.close) - lo) / step).toInt().coerceIn(0, bins - 1)
+        val bodyHi = ((max(k.open, k.close) - lo) / step).toInt().coerceIn(0, bins - 1)
+        for (b in bLo..bHi) w[b] += 1.0
+        for (b in bodyLo..bodyHi) w[b] += 1.0
+    }
+    var poc = 0
+    var total = 0.0
+    for (b in 0 until bins) {
+        total += w[b]
+        if (w[b] > w[poc]) poc = b
+    }
+    var vaL = poc
+    var vaH = poc
+    var acc = w[poc]
+    while (acc < 0.7 * total && (vaL > 0 || vaH < bins - 1)) {
+        val below = if (vaL > 0) w[vaL - 1] else -1.0
+        val above = if (vaH < bins - 1) w[vaH + 1] else -1.0
+        if (above >= below) {
+            vaH++
+            acc += w[vaH]
+        } else {
+            vaL--
+            acc += w[vaL]
+        }
+    }
+    return VpResult(lo, step, w, poc, vaL, vaH, from)
 }
 
 /** Ligne de repères BBMA : Extrême, MHV / Re-entry, bougie CSM / CSAK / CSA. */
@@ -499,16 +623,17 @@ private fun buildData(c: List<Candle>, htf: List<Candle>?): ChartData {
     val atr = Ind.atr(c)
     val zones = ArrayList<ChartZone>()
     try {
-        val sd = SdCalc(c).detect(atr)
-        if (sd != null) zones.add(ChartZone(sd.low, sd.high, sd.dir == Direction.BUY))
-    } catch (e: Exception) {
-        // zone indisponible
-    }
-    try {
         val smc = SmcCalc(c).detect()
         if (smc != null) zones.add(ChartZone(smc.zone.low, smc.zone.high, smc.dir == Direction.BUY))
     } catch (e: Exception) {
         // zone indisponible
+    }
+
+    var sdBoxes: List<SdBox> = emptyList()
+    try {
+        sdBoxes = buildSdBoxes(c, atr)
+    } catch (e: Exception) {
+        // zones Supply/Demand indisponibles
     }
 
     var pdHigh = Double.NEGATIVE_INFINITY
@@ -548,8 +673,25 @@ private fun buildData(c: List<Candle>, htf: List<Candle>?): ChartData {
     }
 
     return ChartData(
-        c, upA, midA, lowA, m5h, m5l, m10h, m10l, e50A,
-        zones, chartLevels(c, atr), pdHigh, pdLow, marksLine(c), marks, liq, ents, patLines
+        c = c,
+        bbUp = upA,
+        bbMid = midA,
+        bbLow = lowA,
+        ma5h = m5h,
+        ma5l = m5l,
+        ma10h = m10h,
+        ma10l = m10l,
+        ema50 = e50A,
+        zones = zones,
+        levels = chartLevels(c, atr),
+        sdBoxes = sdBoxes,
+        pdHigh = pdHigh,
+        pdLow = pdLow,
+        bbmaLine = marksLine(c),
+        marks = marks,
+        liq = liq,
+        entries = ents,
+        patLines = patLines
     )
 }
 
@@ -560,10 +702,14 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
     var showBb by remember { mutableStateOf(true) }
     var showMa by remember { mutableStateOf(true) }
     var showEma by remember { mutableStateOf(false) }
-    var showZones by remember { mutableStateOf(false) }
     var showLiq by remember { mutableStateOf(false) }
     var showEntries by remember { mutableStateOf(false) }
     var showFar by remember { mutableStateOf(false) }
+    var showZones by remember { mutableStateOf(false) }
+    var showSd by remember { mutableStateOf(false) }
+    var showSr by remember { mutableStateOf(false) }
+    var showVp by remember { mutableStateOf(false) }
+    var vpRange by remember { mutableStateOf(100) }
     var showE by remember { mutableStateOf(false) }
     var showM by remember { mutableStateOf(false) }
     var showR by remember { mutableStateOf(false) }
@@ -607,6 +753,11 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
     val tealTp2 = Color(0xFF80CBC4)
     val entryBlue = Color(0xFF29B6F6)
     val neutralGray = Color(0xFFB0BEC5)
+    val supportColor = Color(0xFF9CCC65)
+    val resistColor = Color(0xFFFF7043)
+    val testedColor = Color(0xFFFFB74D)
+    val pocColor = Color(0xFFFFD54F)
+    val vaColor = Color(0xFF42A5F5)
     val buy = spec.buy
     val sideColor = if (buy == null) Color.Gray else if (buy) green else red
 
@@ -646,7 +797,7 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                 LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
             }
         } else {
-            // Rangée 1 : entrées, indicateurs, zones, liquidité
+            // Rangée 1 : entrées, indicateurs, liquidité
             Row(
                 modifier = Modifier.horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -656,10 +807,32 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                 FilterChip(selected = showBb, onClick = { showBb = !showBb }, label = { Text("Bollinger") })
                 FilterChip(selected = showMa, onClick = { showMa = !showMa }, label = { Text("MA5/10") })
                 FilterChip(selected = showEma, onClick = { showEma = !showEma }, label = { Text("EMA50") })
-                FilterChip(selected = showZones, onClick = { showZones = !showZones }, label = { Text("Zones") })
                 FilterChip(selected = showLiq, onClick = { showLiq = !showLiq }, label = { Text("Liquidité") })
             }
-            // Rangée 2 : repères BBMA
+            // Rangée 2 : zones, supports/résistances, profil
+            Row(
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                FilterChip(selected = showZones, onClick = { showZones = !showZones }, label = { Text("Zones") })
+                FilterChip(selected = showSd, onClick = { showSd = !showSd }, label = { Text("Supply/Demand") })
+                FilterChip(selected = showSr, onClick = { showSr = !showSr }, label = { Text("S/R") })
+                FilterChip(selected = showVp, onClick = { showVp = !showVp }, label = { Text("Profil de volume") })
+                if (showVp) {
+                    FilterChip(
+                        selected = false,
+                        onClick = {
+                            vpRange = when (vpRange) {
+                                50 -> 100
+                                100 -> 200
+                                else -> 50
+                            }
+                        },
+                        label = { Text("Plage " + vpRange) }
+                    )
+                }
+            }
+            // Rangée 3 : repères BBMA
             Row(
                 modifier = Modifier.horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -670,7 +843,7 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                 FilterChip(selected = showCs, onClick = { showCs = !showCs }, label = { Text("CSM/CSAK") })
                 FilterChip(selected = showCsa, onClick = { showCsa = !showCsa }, label = { Text("CSA") })
             }
-            // Rangée 3 : patterns
+            // Rangée 4 : patterns
             Row(
                 modifier = Modifier.horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -686,6 +859,9 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
             // Entrées affichées : proches (2 ATR au plus) sauf si « Lointaines » est actif
             val shownEntries: List<EntryLevel> =
                 if (showEntries) d.entries.filter { showFar || it.distAtr <= 2.0 } else emptyList()
+
+            // Profil de volume à plage fixe : calculé sur les dernières bougies, il ne bouge pas avec le défilement
+            val vpData = remember(d, vpRange) { buildVp(d.c, vpRange, 40) }
 
             Canvas(
                 modifier = Modifier
@@ -711,6 +887,7 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                 val cw = plotW / vis
                 val dec = spec.decimals
                 val lastC = d.c.last()
+                val price = lastC.close
 
                 val entry = spec.entry
                 val slP = spec.sl
@@ -719,6 +896,14 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                 val zl = spec.zoneLow
                 val zh = spec.zoneHigh
                 val ents = shownEntries
+
+                // Supports et résistances : les 3 plus proches sous le prix et les 3 plus proches au-dessus
+                val srShown: List<SrLevel> = if (showSr) {
+                    d.levels.filter { it.price < price }.sortedByDescending { it.price }.take(3) +
+                        d.levels.filter { it.price >= price }.sortedBy { it.price }.take(3)
+                } else {
+                    emptyList()
+                }
 
                 var hi = Double.NEGATIVE_INFINITY
                 var lo = Double.POSITIVE_INFINITY
@@ -748,9 +933,20 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                 fun y(p: Double): Float = (h - ((p - lo) / (hi - lo)) * h).toFloat()
                 fun x(j: Int): Float = (j - start + 0.5f) * cw
 
+                // Prix du profil : POC et limites de la zone de valeur
+                val vp = if (showVp) vpData else null
+                var pocP = 0.0
+                var vahP = 0.0
+                var valP = 0.0
+                if (vp != null) {
+                    pocP = vp.lo + (vp.poc + 0.5) * vp.step
+                    vahP = vp.lo + (vp.vaHigh + 1) * vp.step
+                    valP = vp.lo + vp.vaLow * vp.step
+                }
+
                 // Prix des étiquettes colorées : les graduations trop proches seront masquées
                 val specials = ArrayList<Double>()
-                specials.add(lastC.close)
+                specials.add(price)
                 if (entry != null) specials.add(entry)
                 if (slP != null) specials.add(slP)
                 if (tp1P != null) specials.add(tp1P)
@@ -760,6 +956,12 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                     specials.add(lv.sl)
                     specials.add(lv.tp1)
                     specials.add(lv.tp2)
+                }
+                for (lv in srShown) specials.add(lv.price)
+                if (vp != null) {
+                    specials.add(pocP)
+                    specials.add(vahP)
+                    specials.add(valP)
                 }
 
                 // Étiquette de prix dans la marge de droite
@@ -786,7 +988,7 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                     )
                 }
 
-                // Zones : Premium / Discount, Supply & Demand, SMC, niveaux
+                // Zones : Premium / Discount et zone SMC
                 if (showZones) {
                     val mid = (d.pdHigh + d.pdLow) / 2.0
                     drawRect(
@@ -814,17 +1016,6 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                             size = Size(plotW, max(y(z.low) - y(z.high), 2f))
                         )
                     }
-                    for (lv in d.levels) {
-                        if (lv in lo..hi) {
-                            drawLine(
-                                Color(0xFF9E9E9E),
-                                Offset(0f, y(lv)),
-                                Offset(plotW, y(lv)),
-                                strokeWidth = 1.5f,
-                                pathEffect = PathEffect.dashPathEffect(floatArrayOf(4f, 8f))
-                            )
-                        }
-                    }
                 }
 
                 // Entrées en attente : zone, entrée limite, stop et cibles
@@ -843,6 +1034,48 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                         if (lv.tp2 in lo..hi) {
                             drawLine(tealTp2.copy(alpha = 0.6f), Offset(0f, y(lv.tp2)), Offset(plotW, y(lv.tp2)), strokeWidth = 1.5f, pathEffect = dsh)
                         }
+                    }
+                }
+
+                // Profil de volume à plage fixe : barres ancrées sur le bord droit du graphique
+                if (vp != null) {
+                    var maxW = 0.0
+                    for (wv in vp.weights) if (wv > maxW) maxW = wv
+                    val barMax = plotW * 0.32f
+                    if (maxW > 0.0) {
+                        for (b in vp.weights.indices) {
+                            val pLo = vp.lo + b * vp.step
+                            val pHi = pLo + vp.step
+                            val yTop = y(pHi)
+                            val yBot = y(pLo)
+                            if (yBot < 0f || yTop > h) continue
+                            val len = (vp.weights[b] / maxW * barMax).toFloat()
+                            val col = when {
+                                b == vp.poc -> pocColor
+                                b in vp.vaLow..vp.vaHigh -> vaColor
+                                else -> Color(0xFF78909C)
+                            }
+                            drawRect(
+                                col.copy(alpha = if (b == vp.poc) 0.55f else 0.35f),
+                                topLeft = Offset(plotW - len, yTop),
+                                size = Size(len, max(yBot - yTop - 1f, 1f))
+                            )
+                        }
+                    }
+                    val vpDash = PathEffect.dashPathEffect(floatArrayOf(12f, 8f))
+                    drawLine(pocColor, Offset(0f, y(pocP)), Offset(plotW, y(pocP)), strokeWidth = 2f, pathEffect = vpDash)
+                    drawLine(vaColor, Offset(0f, y(vahP)), Offset(plotW, y(vahP)), strokeWidth = 1.5f, pathEffect = vpDash)
+                    drawLine(vaColor, Offset(0f, y(valP)), Offset(plotW, y(valP)), strokeWidth = 1.5f, pathEffect = vpDash)
+                    // Début de la plage fixe
+                    if (vp.fromIdx in start until end) {
+                        val sx = x(vp.fromIdx)
+                        drawLine(
+                            Color(0xFF90A4AE),
+                            Offset(sx, 0f),
+                            Offset(sx, h),
+                            strokeWidth = 1.5f,
+                            pathEffect = PathEffect.dashPathEffect(floatArrayOf(4f, 6f))
+                        )
                     }
                 }
 
@@ -879,6 +1112,19 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                         Offset(0f, y(p)),
                         Offset(plotW, y(p)),
                         strokeWidth = 1f
+                    )
+                }
+
+                // Supports et résistances : lignes épaisses, d'autant plus que le niveau a été respecté
+                for (lv in srShown) {
+                    if (lv.price < lo || lv.price > hi) continue
+                    val sc = if (lv.price < price) supportColor else resistColor
+                    val sw = min(14f, 4f + lv.touches * 2f)
+                    drawLine(
+                        sc.copy(alpha = 0.85f),
+                        Offset(0f, y(lv.price)),
+                        Offset(plotW, y(lv.price)),
+                        strokeWidth = sw
                     )
                 }
 
@@ -930,6 +1176,39 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                         topLeft = Offset(cx - bw / 2f, top),
                         size = Size(bw, max(bot - top, 1f))
                     )
+                }
+
+                // Zones Supply / Demand : bordures de couleur (vert = demande, rouge = offre, orange pointillé = déjà testée)
+                if (showSd) {
+                    val testedDash = PathEffect.dashPathEffect(floatArrayOf(12f, 8f))
+                    for (bx in d.sdBoxes) {
+                        if (bx.startIdx >= end) continue
+                        if (bx.high < lo || bx.low > hi) continue
+                        val x0 = if (bx.startIdx < start) 0f else x(bx.startIdx)
+                        val top = y(bx.high)
+                        val hh = max(y(bx.low) - top, 2f)
+                        val bc = if (bx.tested) testedColor else if (bx.buy) green else red
+                        drawRect(
+                            bc.copy(alpha = 0.07f),
+                            topLeft = Offset(x0, top),
+                            size = Size(plotW - x0, hh)
+                        )
+                        drawRect(
+                            bc,
+                            topLeft = Offset(x0, top),
+                            size = Size(plotW - x0, hh),
+                            style = Stroke(width = if (bx.tested) 2f else 4f, pathEffect = if (bx.tested) testedDash else null)
+                        )
+                        val txt = (if (bx.buy) "Demande" else "Offre") + (if (bx.tested) " testée" else "")
+                        val lay = tm.measure(txt, TextStyle(color = bc, fontSize = 9.sp, fontWeight = FontWeight.Bold))
+                        val ty = top + 3f
+                        drawRect(
+                            Color(0xFF0E1117).copy(alpha = 0.8f),
+                            topLeft = Offset(x0 + 4f, ty),
+                            size = Size(lay.size.width.toFloat() + 4f, lay.size.height.toFloat())
+                        )
+                        drawText(lay, topLeft = Offset(x0 + 6f, ty))
+                    }
                 }
 
                 // Lignes des doubles sommets / creux
@@ -1038,7 +1317,7 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
 
                 // Prix actuel : point sur la dernière bougie
                 if (end == n) {
-                    drawCircle(Color.White, radius = 6f, center = Offset(x(n - 1), y(lastC.close)))
+                    drawCircle(Color.White, radius = 6f, center = Offset(x(n - 1), y(price)))
                 }
 
                 // Marge de droite : fond, graduations (sans chevaucher les étiquettes) et étiquettes
@@ -1048,6 +1327,14 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                     if (specials.any { abs(y(it) - y(p)) < 16f }) continue
                     val layout = tm.measure(fmtPrice(p, dec), TextStyle(color = Color(0xFF90A4AE), fontSize = 10.sp))
                     drawText(layout, topLeft = Offset(plotW + 4f, y(p) - layout.size.height / 2f))
+                }
+                for (lv in srShown) {
+                    label(lv.price, Color.Black, if (lv.price < price) supportColor else resistColor)
+                }
+                if (vp != null) {
+                    label(vahP, Color.White, Color(0xFF1565C0))
+                    label(valP, Color.White, Color(0xFF1565C0))
+                    label(pocP, Color.Black, pocColor)
                 }
                 for (lv in ents) {
                     label(lv.tp2, Color.Black, tealTp2)
@@ -1059,7 +1346,7 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                 if (tp1P != null) label(tp1P, Color.Black, green)
                 if (slP != null) label(slP, Color.White, red)
                 if (entry != null) label(entry, Color.Black, Color.White)
-                label(lastC.close, Color.White, Color(0xFF546E7A))
+                label(price, Color.White, Color(0xFF546E7A))
             }
 
             val dec = spec.decimals
@@ -1116,6 +1403,28 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                 }
             }
 
+            // Détail du profil de volume
+            if (showVp) {
+                val vp = vpData
+                if (vp == null) {
+                    Text(
+                        "Pas assez de bougies pour le profil.",
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else {
+                    Text(
+                        "Profil sur les " + vpRange + " dernières bougies · POC " +
+                            fmtPrice(vp.lo + (vp.poc + 0.5) * vp.step, dec) +
+                            " · zone de valeur " + fmtPrice(vp.lo + vp.vaLow * vp.step, dec) +
+                            " à " + fmtPrice(vp.lo + (vp.vaHigh + 1) * vp.step, dec),
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = pocColor
+                    )
+                }
+            }
+
             val bbmaLine = d.bbmaLine
             if (bbmaLine != null) {
                 Text(bbmaLine, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary)
@@ -1126,7 +1435,13 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
             if (showBb) legend += "Bollinger (bleu) · "
             if (showMa) legend += "MA5 (orange) et MA10 (jaune) · "
             if (showEma) legend += "EMA50 (violet) · "
-            if (showZones) legend += "Zones : vert = demande/discount, rouge = offre/premium, pointillés gris = niveaux · "
+            if (showZones) legend += "Zones : fond vert = discount, fond rouge = premium, bloc coloré = zone SMC · "
+            if (showSd) legend += "Supply/Demand : bordure verte = demande, rouge = offre, orange pointillé = zone déjà testée · "
+            if (showSr) legend += "S/R : lignes épaisses (plus épaisse = niveau plus souvent respecté), vert clair = support, orange = résistance · "
+            if (showVp) {
+                legend += "Profil (plage fixe) : barres = temps passé à chaque prix, jaune = POC, bleu = zone de valeur 70 %. " +
+                    "Deriv ne fournit pas le volume réel · "
+            }
             if (showE || showM || showR) {
                 legend += "Lettres : "
                 if (showE) legend += "E = Extrême  "
