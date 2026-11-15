@@ -94,8 +94,13 @@ object Schedule {
 class AlarmReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         val ctx = context.applicationContext
-        if (!Alerts.isOn(ctx)) return
+        val candlesOn = Alerts.isOn(ctx)
+        val zonesOn = ZoneAlerts.isOn(ctx)
+        if (!candlesOn && !zonesOn) return
         Schedule.scheduleNext(ctx)
+        // Relance le service de zones s'il a été arrêté par le système
+        if (zonesOn) ZoneAlerts.start(ctx)
+        if (!candlesOn) return
         val frames = Schedule.closedFrames(System.currentTimeMillis())
         val data = Data.Builder()
             .putString("tfs", frames.joinToString(",") { it.label })
@@ -112,6 +117,8 @@ class AlarmReceiver : BroadcastReceiver() {
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         val ctx = context.applicationContext
-        if (Alerts.isOn(ctx)) Schedule.scheduleNext(ctx)
+        val zonesOn = ZoneAlerts.isOn(ctx)
+        if (Alerts.isOn(ctx) || zonesOn) Schedule.scheduleNext(ctx)
+        if (zonesOn) ZoneAlerts.start(ctx)
     }
 }
