@@ -15,8 +15,8 @@ import kotlin.coroutines.resumeWithException
 
 /** Données de marché gratuites via l'API WebSocket publique de Deriv (forex + indices synthétiques). */
 object Deriv {
-    private const val URL_NEW = "wss://api.derivws.com/trading/v1/options/ws/public"
-    private const val URL_OLD = "wss://ws.derivws.com/websockets/v3?app_id=1089"
+    internal const val URL_NEW = "wss://api.derivws.com/trading/v1/options/ws/public"
+    internal const val URL_OLD = "wss://ws.derivws.com/websockets/v3?app_id=1089"
 
     private val client = OkHttpClient.Builder()
         .readTimeout(0, TimeUnit.MILLISECONDS)
