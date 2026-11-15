@@ -222,6 +222,7 @@ fun GenieApp(vm: MainVm) {
     val journal by vm.journal.collectAsState()
     val jLoading by vm.jLoading.collectAsState()
     var alerts by remember { mutableStateOf(Alerts.isOn(ctx)) }
+    var zonesOn by remember { mutableStateOf(ZoneAlerts.isOn(ctx)) }
     var screen by remember { mutableStateOf(0) }
     var chart by remember { mutableStateOf<ChartSpec?>(null) }
     var showFar by remember { mutableStateOf(false) }
@@ -241,6 +242,15 @@ fun GenieApp(vm: MainVm) {
         if (granted) {
             Alerts.enable(ctx)
             alerts = true
+        }
+    }
+
+    val zonePermLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            ZoneAlerts.enable(ctx)
+            zonesOn = true
         }
     }
 
@@ -376,6 +386,31 @@ fun GenieApp(vm: MainVm) {
                                 } else {
                                     Alerts.enable(ctx)
                                     alerts = true
+                                }
+                            }
+                        )
+                    }
+
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            "Alertes de zones en temps réel (demande/offre, Re-entry BBMA, support/résistance, dans le sens de la tendance)",
+                            fontSize = 13.sp,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Switch(
+                            checked = zonesOn,
+                            onCheckedChange = { on ->
+                                if (!on) {
+                                    ZoneAlerts.disable(ctx)
+                                    zonesOn = false
+                                } else if (Build.VERSION.SDK_INT >= 33 &&
+                                    ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS)
+                                    != PackageManager.PERMISSION_GRANTED
+                                ) {
+                                    zonePermLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                } else {
+                                    ZoneAlerts.enable(ctx)
+                                    zonesOn = true
                                 }
                             }
                         )
