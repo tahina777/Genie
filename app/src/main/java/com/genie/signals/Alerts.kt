@@ -44,8 +44,8 @@ object Alerts {
 
     fun disable(ctx: Context) {
         WorkManager.getInstance(ctx).cancelUniqueWork(WORK)
-        Schedule.cancel(ctx)
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean("alerts", false).apply()
+        if (!ZoneAlerts.isOn(ctx)) Schedule.cancel(ctx)
     }
 
     fun notify(ctx: Context, s: Signal) {
