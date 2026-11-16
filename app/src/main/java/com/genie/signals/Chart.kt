@@ -709,6 +709,7 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
     var showSd by remember { mutableStateOf(false) }
     var showSr by remember { mutableStateOf(false) }
     var showVp by remember { mutableStateOf(false) }
+    var showFib by remember { mutableStateOf(false) }
     var vpRange by remember { mutableStateOf(100) }
     var showE by remember { mutableStateOf(false) }
     var showM by remember { mutableStateOf(false) }
@@ -817,6 +818,7 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                 FilterChip(selected = showZones, onClick = { showZones = !showZones }, label = { Text("Zones") })
                 FilterChip(selected = showSd, onClick = { showSd = !showSd }, label = { Text("Supply/Demand") })
                 FilterChip(selected = showSr, onClick = { showSr = !showSr }, label = { Text("S/R") })
+                FilterChip(selected = showFib, onClick = { showFib = !showFib }, label = { Text("Fibonacci") })
                 FilterChip(selected = showVp, onClick = { showVp = !showVp }, label = { Text("Profil de volume") })
                 if (showVp) {
                     FilterChip(
@@ -907,10 +909,25 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
 
                 var hi = Double.NEGATIVE_INFINITY
                 var lo = Double.POSITIVE_INFINITY
+                var ihi = start
+                var ilo = start
                 for (j in start until end) {
+                    if (d.c[j].high > hi) ihi = j
+                    if (d.c[j].low < lo) ilo = j
                     hi = max(hi, d.c[j].high)
                     lo = min(lo, d.c[j].low)
                 }
+
+                // Fibonacci : retracement du plus grand mouvement visible (extrême haut et extrême bas)
+                val swHi = hi
+                val swLo = lo
+                val fibRatios = doubleArrayOf(0.0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0)
+                val fibNames = arrayOf("0", "23.6", "38.2", "50", "61.8", "78.6", "100")
+                val fibDown = ilo > ihi // mouvement baissier : du haut vers le bas, 0 % au bas
+                val fibOn = showFib && swHi > swLo && ihi != ilo
+                fun fibPrice(r: Double): Double =
+                    if (fibDown) swLo + r * (swHi - swLo) else swHi - r * (swHi - swLo)
+                val fibColor = Color(0xFFEC407A)
                 for (p in listOfNotNull(entry, slP, tp1P, tp2P)) {
                     hi = max(hi, p)
                     lo = min(lo, p)
@@ -958,6 +975,7 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                     specials.add(lv.tp2)
                 }
                 for (lv in srShown) specials.add(lv.price)
+                if (fibOn) for (r in fibRatios) specials.add(fibPrice(r))
                 if (vp != null) {
                     specials.add(pocP)
                     specials.add(vahP)
@@ -1126,6 +1144,41 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                         Offset(plotW, y(lv.price)),
                         strokeWidth = sw
                     )
+                }
+
+                // Fibonacci : zone dorée 50 - 61.8 %, ligne du mouvement et niveaux
+                if (fibOn) {
+                    val x0 = max(0f, x(min(ihi, ilo)))
+                    val gTop = y(max(fibPrice(0.5), fibPrice(0.618)))
+                    val gBot = y(min(fibPrice(0.5), fibPrice(0.618)))
+                    drawRect(
+                        fibColor.copy(alpha = 0.12f),
+                        topLeft = Offset(x0, gTop),
+                        size = Size(plotW - x0, max(gBot - gTop, 2f))
+                    )
+                    drawLine(
+                        fibColor.copy(alpha = 0.6f),
+                        Offset(x(ihi), y(swHi)),
+                        Offset(x(ilo), y(swLo)),
+                        strokeWidth = 2f,
+                        pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 6f))
+                    )
+                    for (k in fibRatios.indices) {
+                        val r = fibRatios[k]
+                        val yy = y(fibPrice(r))
+                        val key = r == 0.5 || r == 0.618
+                        drawLine(
+                            fibColor.copy(alpha = if (key) 0.95f else 0.7f),
+                            Offset(x0, yy),
+                            Offset(plotW, yy),
+                            strokeWidth = if (key) 2.5f else 1.5f
+                        )
+                        val lay = tm.measure(
+                            fibNames[k] + " %",
+                            TextStyle(color = fibColor, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                        )
+                        drawText(lay, topLeft = Offset(plotW - lay.size.width - 4f, yy - lay.size.height - 1f))
+                    }
                 }
 
                 fun series(arr: DoubleArray, color: Color, sw: Float) {
@@ -1331,6 +1384,9 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                 for (lv in srShown) {
                     label(lv.price, Color.Black, if (lv.price < price) supportColor else resistColor)
                 }
+                if (fibOn) {
+                    for (r in fibRatios) label(fibPrice(r), Color.White, Color(0xFFAD1457))
+                }
                 if (vp != null) {
                     label(vahP, Color.White, Color(0xFF1565C0))
                     label(valP, Color.White, Color(0xFF1565C0))
@@ -1438,6 +1494,10 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
             if (showZones) legend += "Zones : fond vert = discount, fond rouge = premium, bloc coloré = zone SMC · "
             if (showSd) legend += "Supply/Demand : bordure verte = demande, rouge = offre, orange pointillé = zone déjà testée · "
             if (showSr) legend += "S/R : lignes épaisses (plus épaisse = niveau plus souvent respecté), vert clair = support, orange = résistance · "
+            if (showFib) {
+                legend += "Fibonacci : retracement du plus grand mouvement visible (0 % = extrême le plus récent, 100 % = départ du mouvement), " +
+                    "zone rose = 50 à 61,8 %. Il change si tu zoomes ou fais défiler · "
+            }
             if (showVp) {
                 legend += "Profil (plage fixe) : barres = temps passé à chaque prix, jaune = POC, bleu = zone de valeur 70 %. " +
                     "Deriv ne fournit pas le volume réel · "
