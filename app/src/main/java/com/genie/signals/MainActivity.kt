@@ -15,6 +15,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
@@ -28,6 +29,8 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.LinearProgressIndicator
@@ -50,6 +53,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -226,6 +230,7 @@ fun GenieApp(vm: MainVm) {
     var screen by remember { mutableStateOf(0) }
     var chart by remember { mutableStateOf<ChartSpec?>(null) }
     var showFar by remember { mutableStateOf(false) }
+    var menuOpen by remember { mutableStateOf(false) }
     var capText by remember {
         mutableStateOf(LotCalc.capital(ctx).let { if (it > 0) numText(it) else "" })
     }
@@ -268,77 +273,123 @@ fun GenieApp(vm: MainVm) {
     } else {
         Scaffold(
             containerColor = MaterialTheme.colorScheme.background,
-            topBar = { TopAppBar(title = { Text("Genie · Signaux SMC + BBMA") }) }
+            topBar = { TopAppBar(title = { Text("Genie · Signaux SMC + BBMA", fontSize = 16.sp) }) }
         ) { pad ->
             Column(
                 modifier = Modifier
                     .padding(pad)
                     .padding(horizontal = 16.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
+                verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf("Scanner", "Journal").forEachIndexed { idx, label ->
+                val marketsShown = when (filter) {
+                    1 -> ALL_MARKETS.filter { !it.synthetic }
+                    2 -> ALL_MARKETS.filter { it.synthetic }
+                    else -> ALL_MARKETS
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Row(
+                        modifier = Modifier
+                            .weight(1f)
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
                         FilterChip(
-                            selected = idx == screen,
+                            selected = screen == 0,
+                            enabled = !busy,
                             onClick = {
-                                screen = idx
-                                if (idx == 1) vm.loadJournal(ctx)
+                                screen = 0
+                                vm.scan(ctx)
                             },
-                            label = { Text(label) }
+                            label = { Text(if (loading) "Analyse…" else "Scanner", fontSize = 12.sp) }
                         )
+                        FilterChip(
+                            selected = false,
+                            enabled = !busy,
+                            onClick = {
+                                screen = 0
+                                vm.findEntries()
+                            },
+                            label = { Text(if (entLoading) "Recherche…" else "Attente", fontSize = 12.sp) }
+                        )
+                        FilterChip(
+                            selected = false,
+                            enabled = !busy,
+                            onClick = {
+                                screen = 0
+                                vm.backtest()
+                            },
+                            label = { Text(if (btLoading) "Backtest…" else "Backtest", fontSize = 12.sp) }
+                        )
+                        FilterChip(
+                            selected = screen == 1,
+                            onClick = {
+                                screen = 1
+                                vm.loadJournal(ctx)
+                            },
+                            label = { Text("Journal", fontSize = 12.sp) }
+                        )
+                    }
+                    Box {
+                        Text(
+                            "⋮",
+                            fontSize = 24.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier
+                                .clickable { menuOpen = true }
+                                .padding(horizontal = 12.dp, vertical = 4.dp)
+                        )
+                        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        "Graphique d'un marché (" + tf.label + ")",
+                                        fontSize = 12.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                },
+                                onClick = {},
+                                enabled = false
+                            )
+                            marketsShown.forEach { m ->
+                                DropdownMenuItem(
+                                    text = { Text(m.name, fontSize = 14.sp) },
+                                    onClick = {
+                                        menuOpen = false
+                                        chart = plainChartSpec(m, tf)
+                                    }
+                                )
+                            }
+                        }
                     }
                 }
 
                 if (screen == 0) {
                     Row(
                         modifier = Modifier.horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         SCAN_FRAMES.forEach { t ->
                             FilterChip(
                                 selected = t == tf,
                                 onClick = { vm.tf.value = t },
-                                label = { Text(t.label) }
+                                label = { Text(t.label, fontSize = 12.sp) }
                             )
                         }
-                    }
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         listOf("Tous", "Forex", "Synthétiques").forEachIndexed { idx, label ->
                             FilterChip(
                                 selected = idx == filter,
                                 onClick = { vm.filter.value = idx },
-                                label = { Text(label) }
+                                label = { Text(label, fontSize = 12.sp) }
                             )
                         }
                     }
-                    Button(
-                        onClick = { vm.scan(ctx) },
-                        enabled = !busy,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text(if (loading) "Analyse en cours…" else "Scanner le marché")
-                    }
-                    OutlinedButton(
-                        onClick = { vm.findEntries() },
-                        enabled = !busy,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text(if (entLoading) "Recherche des entrées…" else "Entrées en attente")
-                    }
-                    OutlinedButton(
-                        onClick = { vm.backtest() },
-                        enabled = !busy,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text(if (btLoading) "Backtest en cours…" else "Lancer le backtest")
-                    }
                     if (busy) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                    Text(status, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(status, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     if (entStatus.isNotEmpty()) {
-                        Text(entStatus, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(entStatus, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     if (btStatus.isNotEmpty()) {
-                        Text(btStatus, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(btStatus, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
 
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -348,8 +399,9 @@ fun GenieApp(vm: MainVm) {
                                 capText = it
                                 LotCalc.save(ctx, parseNum(it), riskPct)
                             },
-                            label = { Text("Capital ($)") },
+                            label = { Text("Capital ($)", fontSize = 11.sp) },
                             singleLine = true,
+                            textStyle = TextStyle(fontSize = 14.sp),
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                             modifier = Modifier.weight(1f)
                         )
@@ -359,8 +411,9 @@ fun GenieApp(vm: MainVm) {
                                 riskText = it
                                 LotCalc.save(ctx, capital, parseNum(it))
                             },
-                            label = { Text("Risque (%)") },
+                            label = { Text("Risque (%)", fontSize = 11.sp) },
                             singleLine = true,
+                            textStyle = TextStyle(fontSize = 14.sp),
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                             modifier = Modifier.weight(1f)
                         )
@@ -368,8 +421,8 @@ fun GenieApp(vm: MainVm) {
 
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
-                            "Alertes en arrière-plan (H1, H4, D1 et combos BBMA, score ≥ 70)",
-                            fontSize = 13.sp,
+                            "Alertes en arrière-plan (H1, H4, D1, score ≥ 70)",
+                            fontSize = 12.sp,
                             modifier = Modifier.weight(1f)
                         )
                         Switch(
@@ -393,8 +446,8 @@ fun GenieApp(vm: MainVm) {
 
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
-                            "Alertes de zones en temps réel (demande/offre, Re-entry BBMA, support/résistance, dans le sens de la tendance)",
-                            fontSize = 13.sp,
+                            "Alertes de zones en temps réel (offre/demande, re-entry, S/R)",
+                            fontSize = 12.sp,
                             modifier = Modifier.weight(1f)
                         )
                         Switch(
@@ -414,29 +467,6 @@ fun GenieApp(vm: MainVm) {
                                 }
                             }
                         )
-                    }
-
-                    Text(
-                        "Graphique d'un marché (" + tf.label + ")",
-                        fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Row(
-                        modifier = Modifier.horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        val shown = when (filter) {
-                            1 -> ALL_MARKETS.filter { !it.synthetic }
-                            2 -> ALL_MARKETS.filter { it.synthetic }
-                            else -> ALL_MARKETS
-                        }
-                        shown.forEach { m ->
-                            FilterChip(
-                                selected = false,
-                                onClick = { chart = plainChartSpec(m, tf) },
-                                label = { Text(m.name) }
-                            )
-                        }
                     }
 
                     LazyColumn(
