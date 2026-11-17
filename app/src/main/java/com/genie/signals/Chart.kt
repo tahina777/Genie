@@ -141,7 +141,9 @@ private class ChartData(
     val marks: List<Mark>,
     val liq: List<LiqLine>,
     val entries: List<EntryLevel>,
-    val patLines: List<PatLine>
+    val patLines: List<PatLine>,
+    val qm: List<QmSetup>,
+    val snr: List<SnrSetup>
 )
 
 private fun fmtPrice(v: Double, d: Int): String =
@@ -672,6 +674,18 @@ private fun buildData(c: List<Candle>, htf: List<Candle>?): ChartData {
         // entrées indisponibles
     }
 
+    var qm: List<QmSetup> = emptyList()
+    var snr: List<SnrSetup> = emptyList()
+    try {
+        val qcs = c.map { QmCandle(it.time, it.open, it.high, it.low, it.close) }
+        val lastClose = c.last().close
+        // Seulement les setups actifs dont l'entrée est à 5 ATR du prix au plus
+        qm = QmSetups.detect(qcs).filter { abs(it.entry - lastClose) <= 5.0 * atr }
+        snr = SnrSetups.detect(qcs).filter { abs(it.entry - lastClose) <= 5.0 * atr }
+    } catch (e: Exception) {
+        // setups QM / SNRC indisponibles
+    }
+
     return ChartData(
         c = c,
         bbUp = upA,
@@ -691,7 +705,9 @@ private fun buildData(c: List<Candle>, htf: List<Candle>?): ChartData {
         marks = marks,
         liq = liq,
         entries = ents,
-        patLines = patLines
+        patLines = patLines,
+        qm = qm,
+        snr = snr
     )
 }
 
@@ -722,6 +738,13 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
     var showInside by remember { mutableStateOf(false) }
     var showStar by remember { mutableStateOf(false) }
     var showDouble by remember { mutableStateOf(false) }
+    var showQmr by remember { mutableStateOf(false) }
+    var showQmc by remember { mutableStateOf(false) }
+    var showQmm by remember { mutableStateOf(false) }
+    var showQm2p by remember { mutableStateOf(false) }
+    var showSnr1 by remember { mutableStateOf(false) }
+    var showSnr2 by remember { mutableStateOf(false) }
+    var showSnr3 by remember { mutableStateOf(false) }
     var visible by remember { mutableStateOf(80) }
     var shift by remember { mutableStateOf(0f) }
     val tm = rememberTextMeasurer()
@@ -857,10 +880,34 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                 FilterChip(selected = showStar, onClick = { showStar = !showStar }, label = { Text("Étoile") })
                 FilterChip(selected = showDouble, onClick = { showDouble = !showDouble }, label = { Text("Double top/bottom") })
             }
+            // Rangée 5 : setups de la fiche (QM et SNRC)
+            Row(
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                FilterChip(selected = showQmr, onClick = { showQmr = !showQmr }, label = { Text("QMR") })
+                FilterChip(selected = showQmc, onClick = { showQmc = !showQmc }, label = { Text("QMC") })
+                FilterChip(selected = showQmm, onClick = { showQmm = !showQmm }, label = { Text("QMM") })
+                FilterChip(selected = showQm2p, onClick = { showQm2p = !showQm2p }, label = { Text("QM2P") })
+                FilterChip(selected = showSnr1, onClick = { showSnr1 = !showSnr1 }, label = { Text("SNRC1") })
+                FilterChip(selected = showSnr2, onClick = { showSnr2 = !showSnr2 }, label = { Text("SNRC2") })
+                FilterChip(selected = showSnr3, onClick = { showSnr3 = !showSnr3 }, label = { Text("SNRC3") })
+            }
 
             // Entrées affichées : proches (2 ATR au plus) sauf si « Lointaines » est actif
             val shownEntries: List<EntryLevel> =
                 if (showEntries) d.entries.filter { showFar || it.distAtr <= 2.0 } else emptyList()
+
+            // Setups QM et SNRC : seulement ceux dont le bouton est actif (3 plus récents par famille)
+            val anySetup = showQmr || showQmc || showQmm || showQm2p || showSnr1 || showSnr2 || showSnr3
+            val qmShown: List<QmSetup> = d.qm.filter { q ->
+                (showQmr && QmType.QMR in q.types) || (showQmc && QmType.QMC in q.types) ||
+                    (showQmm && QmType.QMM in q.types) || (showQm2p && QmType.QM2P in q.types)
+            }.take(3)
+            val snrShown: List<SnrSetup> = d.snr.filter { sn ->
+                (showSnr1 && sn.type == SnrType.SNRC1) || (showSnr2 && sn.type == SnrType.SNRC2) ||
+                    (showSnr3 && sn.type == SnrType.SNRC3)
+            }.take(3)
 
             // Profil de volume à plage fixe : calculé sur les dernières bougies, il ne bouge pas avec le défilement
             val vpData = remember(d, vpRange) { buildVp(d.c, vpRange, 40) }
@@ -942,6 +989,18 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                         lo = min(lo, p)
                     }
                 }
+                for (q in qmShown) {
+                    for (p in listOf(q.entry, q.stopLoss, q.tp1)) {
+                        hi = max(hi, p)
+                        lo = min(lo, p)
+                    }
+                }
+                for (sn in snrShown) {
+                    for (p in listOf(sn.entry, sn.stopLoss, sn.tp1)) {
+                        hi = max(hi, p)
+                        lo = min(lo, p)
+                    }
+                }
                 val pad = (hi - lo) * 0.05
                 hi += pad
                 lo -= pad
@@ -975,6 +1034,16 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                     specials.add(lv.tp2)
                 }
                 for (lv in srShown) specials.add(lv.price)
+                for (q in qmShown) {
+                    specials.add(q.entry)
+                    specials.add(q.stopLoss)
+                    specials.add(q.tp1)
+                }
+                for (sn in snrShown) {
+                    specials.add(sn.entry)
+                    specials.add(sn.stopLoss)
+                    specials.add(sn.tp1)
+                }
                 if (fibOn) for (r in fibRatios) specials.add(fibPrice(r))
                 if (vp != null) {
                     specials.add(pocP)
@@ -1264,6 +1333,83 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                     }
                 }
 
+                // Setups QM (QMR, QMC, QMM, QM2P) et SNRC1/2/3 : zone, structure, entrée, stop et cibles
+                val setDash = PathEffect.dashPathEffect(floatArrayOf(10f, 8f))
+                fun setupTag(txt: String, col: Color, px: Float, py: Float) {
+                    val lay = tm.measure(txt, TextStyle(color = col, fontSize = 10.sp, fontWeight = FontWeight.Bold))
+                    drawRect(
+                        Color(0xFF0E1117).copy(alpha = 0.85f),
+                        topLeft = Offset(px, py),
+                        size = Size(lay.size.width.toFloat() + 6f, lay.size.height.toFloat())
+                    )
+                    drawText(lay, topLeft = Offset(px + 3f, py))
+                }
+                fun setupLines(x0: Float, e: Double, sl: Double, t1: Double, t2: Double) {
+                    drawLine(entryBlue, Offset(x0, y(e)), Offset(plotW, y(e)), strokeWidth = 2.5f, pathEffect = setDash)
+                    drawLine(red.copy(alpha = 0.85f), Offset(x0, y(sl)), Offset(plotW, y(sl)), strokeWidth = 1.5f, pathEffect = setDash)
+                    drawLine(green.copy(alpha = 0.85f), Offset(x0, y(t1)), Offset(plotW, y(t1)), strokeWidth = 1.5f, pathEffect = setDash)
+                    if (t2 in lo..hi) {
+                        drawLine(tealTp2.copy(alpha = 0.6f), Offset(x0, y(t2)), Offset(plotW, y(t2)), strokeWidth = 1.5f, pathEffect = setDash)
+                    }
+                }
+                for (q in qmShown) {
+                    if (q.breakIdx >= end) continue
+                    val sellQ = q.direction == QmDirection.SELL
+                    val qcol = if (sellQ) red else green
+                    val xs = if (q.shoulderIdx < start) 0f else x(q.shoulderIdx)
+                    val xb = if (q.breakIdx < start) 0f else x(q.breakIdx)
+                    drawRect(
+                        qcol.copy(alpha = 0.18f),
+                        topLeft = Offset(xs, y(q.zoneHigh)),
+                        size = Size(plotW - xs, max(y(q.zoneLow) - y(q.zoneHigh), 2f))
+                    )
+                    val shP = if (sellQ) q.zoneHigh else q.zoneLow
+                    val hdP = if (sellQ) d.c[q.headIdx].high else d.c[q.headIdx].low
+                    val qpath = Path()
+                    qpath.moveTo(x(q.shoulderIdx), y(shP))
+                    qpath.lineTo(x(q.baseIdx), y(q.tp1))
+                    qpath.lineTo(x(q.headIdx), y(hdP))
+                    qpath.lineTo(x(q.breakIdx), y(d.c[q.breakIdx].close))
+                    drawPath(qpath, qcol, style = Stroke(width = 2.5f))
+                    drawCircle(qcol, radius = 5f, center = Offset(x(q.shoulderIdx), y(shP)))
+                    drawCircle(qcol, radius = 5f, center = Offset(x(q.headIdx), y(hdP)))
+                    val h2 = q.head2Idx
+                    if (h2 != null) {
+                        drawCircle(qcol, radius = 5f, center = Offset(x(h2), y(if (sellQ) d.c[h2].high else d.c[h2].low)))
+                    }
+                    setupLines(xb, q.entry, q.stopLoss, q.tp1, q.tp2)
+                    val nm = q.types.sortedBy { it.ordinal }.joinToString("+") { it.name }
+                    setupTag(
+                        nm + (if (sellQ) " vente" else " achat"),
+                        qcol,
+                        xs + 4f,
+                        if (sellQ) y(q.zoneHigh) - 16f else y(q.zoneLow) + 3f
+                    )
+                }
+                for (sn in snrShown) {
+                    if (sn.breakIdx >= end) continue
+                    val sellS = sn.direction == QmDirection.SELL
+                    val scol = if (sellS) red else green
+                    val xp = if (sn.pivotIdx < start) 0f else x(sn.pivotIdx)
+                    val xb = if (sn.breakIdx < start) 0f else x(sn.breakIdx)
+                    drawRect(
+                        scol.copy(alpha = 0.18f),
+                        topLeft = Offset(xp, y(sn.zoneHigh)),
+                        size = Size(plotW - xp, max(y(sn.zoneLow) - y(sn.zoneHigh), 2f))
+                    )
+                    drawLine(Color.White.copy(alpha = 0.9f), Offset(xp, y(sn.level)), Offset(plotW, y(sn.level)), strokeWidth = 3f)
+                    drawCircle(scol, radius = 5f, center = Offset(x(sn.breakIdx), y(d.c[sn.breakIdx].close)))
+                    val rt = sn.retestIdx
+                    if (rt != null) drawCircle(entryBlue, radius = 6f, center = Offset(x(rt), y(sn.level)))
+                    setupLines(xb, sn.entry, sn.stopLoss, sn.tp1, sn.tp2)
+                    setupTag(
+                        sn.type.name + (if (sellS) " vente" else " achat"),
+                        scol,
+                        xp + 4f,
+                        if (sellS) y(sn.zoneHigh) - 16f else y(sn.zoneLow) + 3f
+                    )
+                }
+
                 // Lignes des doubles sommets / creux
                 if (showDouble) {
                     for (pl in d.patLines) {
@@ -1398,6 +1544,16 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                     label(lv.sl, Color.White, Color(0xFFB71C1C))
                     label(lv.entry, Color.Black, entryBlue)
                 }
+                for (q in qmShown) {
+                    label(q.tp1, Color.White, Color(0xFF1B5E20))
+                    label(q.stopLoss, Color.White, Color(0xFFB71C1C))
+                    label(q.entry, Color.Black, entryBlue)
+                }
+                for (sn in snrShown) {
+                    label(sn.tp1, Color.White, Color(0xFF1B5E20))
+                    label(sn.stopLoss, Color.White, Color(0xFFB71C1C))
+                    label(sn.entry, Color.Black, entryBlue)
+                }
                 if (tp2P != null) label(tp2P, Color.Black, tealTp2)
                 if (tp1P != null) label(tp1P, Color.Black, green)
                 if (slP != null) label(slP, Color.White, red)
@@ -1455,6 +1611,50 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                         fontSize = 12.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = if (lv.trend >= 1) green else if (lv.trend == 0) neutralGray else Color(0xFFFFB74D)
+                    )
+                }
+            }
+
+            // Détail des setups QM et SNRC
+            if (anySetup) {
+                if (qmShown.isEmpty() && snrShown.isEmpty()) {
+                    Text(
+                        "Aucun setup actif et proche (5 ATR au plus) pour les boutons choisis sur ce marché.",
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                for (q in qmShown) {
+                    val sellQ = q.direction == QmDirection.SELL
+                    val nm = q.types.sortedBy { it.ordinal }.joinToString("+") { it.name }
+                    Text(
+                        nm + (if (sellQ) " vente" else " achat") + " · Entrée " + fmtPrice(q.entry, dec) +
+                            " · SL " + fmtPrice(q.stopLoss, dec) + " · TP1 " + fmtPrice(q.tp1, dec) +
+                            " · TP2 " + fmtPrice(q.tp2, dec) + " · R/R " + String.format(Locale.US, "%.1f", q.rr),
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = if (sellQ) red else green
+                    )
+                    Text(
+                        if (q.status == QmStatus.TRIGGERED) "Entrée déjà touchée" else "En attente du retour sur la zone",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                for (sn in snrShown) {
+                    val sellS = sn.direction == QmDirection.SELL
+                    Text(
+                        sn.type.name + (if (sellS) " vente" else " achat") + " · Niveau " + fmtPrice(sn.entry, dec) +
+                            " · SL " + fmtPrice(sn.stopLoss, dec) + " · TP1 " + fmtPrice(sn.tp1, dec) +
+                            " · TP2 " + fmtPrice(sn.tp2, dec) + " · R/R " + String.format(Locale.US, "%.1f", sn.rr),
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = if (sellS) red else green
+                    )
+                    Text(
+                        if (sn.status == QmStatus.TRIGGERED) "Niveau déjà testé" else "En attente du test du niveau",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             }
@@ -1521,6 +1721,10 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                 if (showStar) legend += "ST = Étoile du matin/soir  "
                 if (showDouble) legend += "DC = Double creux, DS = Double sommet  "
                 legend += "(vert sous la bougie = haussier, rouge au-dessus = baissier, gris = neutre) · "
+            }
+            if (anySetup) {
+                legend += "Setups : zone colorée = entrée, trait épais = structure (épaule, base, tête, cassure), " +
+                    "bleu = entrée, rouge = SL, vert = TP1, turquoise = TP2. Setups actifs seulement · "
             }
             if (legend.isNotEmpty()) {
                 Text(legend.removeSuffix(" · "), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
