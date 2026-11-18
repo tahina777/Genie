@@ -12,7 +12,8 @@ class TrendFigure(
     val name: String,
     val buy: Boolean?,
     val status: String,
-    val lines: List<FigLine>
+    val lines: List<FigLine>,
+    val score: Double
 )
 
 private class Pv(val i: Int, val p: Double)
@@ -36,7 +37,14 @@ object TrendFigures {
 
         val out = ArrayList<TrendFigure>()
         fun add(f: TrendFigure?) {
-            if (f != null && out.none { it.name == f.name }) out.add(f)
+            if (f == null) return
+            val same = out.firstOrNull { it.name == f.name }
+            if (same == null) {
+                out.add(f)
+            } else if (f.score > same.score) {
+                out.remove(same)
+                out.add(f)
+            }
         }
         // deux échelles de sommets/creux : petits mouvements (3 bougies) et grands mouvements (5 bougies)
         for (k in intArrayOf(3, 5)) {
@@ -48,7 +56,8 @@ object TrendFigures {
             add(triple(c, atr, hs, true))
             add(triple(c, atr, ls, false))
         }
-        return out.take(3)
+        // une seule figure à la fois : la plus récente et la mieux formée
+        return out.sortedByDescending { it.score }.take(1)
     }
 
     private fun pivots(c: List<Candle>, k: Int, highs: Boolean): List<Pv> {
@@ -107,7 +116,7 @@ object TrendFigures {
                 val start = min(h.first().i, l.first().i)
                 val endP = max(h.last().i, l.last().i)
                 val span = endP - start
-                if (span < 8 || span > 150) continue
+                if (span < 8 || span > 80) continue
                 if (n - 1 - endP > 25) continue
 
                 val gs = u.at(start) - lo.at(start)
@@ -170,7 +179,8 @@ object TrendFigures {
                     listOf(
                         FigLine(i1, u.at(i1), n - 1, uL, false),
                         FigLine(i2, lo.at(i2), n - 1, lL, false)
-                    )
+                    ),
+                    10.0 * (nh + nl) - 0.5 * (n - 1 - endP) - 0.05 * span
                 )
             }
         }
@@ -189,7 +199,7 @@ object TrendFigures {
         val shoulder = if (top) max(a.p, d.p) else min(a.p, d.p)
         if ((b.p - shoulder) * s < 0.6 * atr) return null // la tête doit dépasser les épaules
         if (abs(a.p - d.p) > 0.7 * atr) return null // épaules à peu près au même niveau
-        if (d.i - a.i > 150 || n - 1 - d.i > 30) return null
+        if (d.i - a.i > 120 || n - 1 - d.i > 30) return null
 
         val n1 = between(c, a.i, b.i, top)
         val n2 = between(c, b.i, d.i, top)
@@ -210,7 +220,8 @@ object TrendFigures {
                 FigLine(n1.i, n1.p, b.i, b.p, true),
                 FigLine(b.i, b.p, n2.i, n2.p, true),
                 FigLine(n2.i, n2.p, d.i, d.p, true)
-            )
+            ),
+            40.0 - 0.5 * (n - 1 - d.i) - 0.05 * (d.i - a.i)
         )
     }
 
@@ -225,7 +236,7 @@ object TrendFigures {
         val hiP = max(a.p, max(b.p, d.p))
         val loP = min(a.p, min(b.p, d.p))
         if (hiP - loP > 0.5 * atr) return null
-        if (d.i - a.i > 150 || d.i - a.i < 12 || n - 1 - d.i > 30) return null
+        if (d.i - a.i > 120 || d.i - a.i < 12 || n - 1 - d.i > 30) return null
 
         val mean = (a.p + b.p + d.p) / 3.0
         val n1 = between(c, a.i, b.i, top)
@@ -250,7 +261,8 @@ object TrendFigures {
                 FigLine(n1.i, n1.p, b.i, b.p, true),
                 FigLine(b.i, b.p, n2.i, n2.p, true),
                 FigLine(n2.i, n2.p, d.i, d.p, true)
-            )
+            ),
+            40.0 - 0.5 * (n - 1 - d.i) - 0.05 * (d.i - a.i)
         )
     }
 }
