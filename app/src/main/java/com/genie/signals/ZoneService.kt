@@ -233,6 +233,14 @@ class ZoneService : Service() {
                             } catch (e: Exception) {
                                 // une erreur de confirmation ne doit pas bloquer le calcul des zones
                             }
+                            // Setups de la fiche (QMR, QMC, QMM, QM2P, SNRC1/2/3) : alerte quand un setup récent apparaît
+                            try {
+                                SetupAlerts.scan(this@ZoneService, m, tf, raw)
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                // une erreur d'alerte ne doit pas bloquer le calcul des zones
+                            }
                             Res(m, tf, true, ZoneBuilder.build(m, tf, raw))
                         } catch (e: CancellationException) {
                             throw e
