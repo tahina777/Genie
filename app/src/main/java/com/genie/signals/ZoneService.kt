@@ -220,7 +220,20 @@ class ZoneService : Service() {
                 async {
                     gate.withPermit {
                         try {
-                            Res(m, tf, true, ZoneBuilder.build(m, tf, Deriv.candles(m.code, tf.seconds, 300)))
+                            val raw = Deriv.candles(m.code, tf.seconds, 300)
+                            // Confirmation : la bougie qui vient de se fermer a-t-elle réagi dans une zone surveillée ?
+                            try {
+                                val mine = old.filter { it.market.code == m.code && it.tf == tf }
+                                val hit = ZoneConfirm.check(m, tf, raw, mine)
+                                if (hit != null && !ZoneConfirm.alreadySent(this@ZoneService, m, tf, hit.candle.time)) {
+                                    ZoneConfirm.notify(this@ZoneService, m, tf, hit)
+                                }
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                // une erreur de confirmation ne doit pas bloquer le calcul des zones
+                            }
+                            Res(m, tf, true, ZoneBuilder.build(m, tf, raw))
                         } catch (e: CancellationException) {
                             throw e
                         } catch (e: Exception) {
