@@ -143,7 +143,8 @@ private class ChartData(
     val entries: List<EntryLevel>,
     val patLines: List<PatLine>,
     val qm: List<QmSetup>,
-    val snr: List<SnrSetup>
+    val snr: List<SnrSetup>,
+    val hyb: List<HybridSetup>
 )
 
 private fun fmtPrice(v: Double, d: Int): String =
@@ -676,12 +677,14 @@ private fun buildData(c: List<Candle>, htf: List<Candle>?): ChartData {
 
     var qm: List<QmSetup> = emptyList()
     var snr: List<SnrSetup> = emptyList()
+    var hyb: List<HybridSetup> = emptyList()
     try {
         val qcs = c.map { QmCandle(it.time, it.open, it.high, it.low, it.close) }
         val lastClose = c.last().close
         // Seulement les setups actifs dont l'entrée est à 5 ATR du prix au plus
         qm = QmSetups.detect(qcs).filter { abs(it.entry - lastClose) <= 5.0 * atr }
         snr = SnrSetups.detect(qcs).filter { abs(it.entry - lastClose) <= 5.0 * atr }
+        hyb = HybridSetups.detect(qcs).filter { abs(it.entry - lastClose) <= 5.0 * atr }
     } catch (e: Exception) {
         // setups QM / SNRC indisponibles
     }
@@ -707,7 +710,8 @@ private fun buildData(c: List<Candle>, htf: List<Candle>?): ChartData {
         entries = ents,
         patLines = patLines,
         qm = qm,
-        snr = snr
+        snr = snr,
+        hyb = hyb
     )
 }
 
@@ -746,6 +750,8 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
     var showSnr1 by remember { mutableStateOf(false) }
     var showSnr2 by remember { mutableStateOf(false) }
     var showSnr3 by remember { mutableStateOf(false) }
+    var showHy1 by remember { mutableStateOf(false) }
+    var showHy2 by remember { mutableStateOf(false) }
     var visible by remember { mutableStateOf(80) }
     var shift by remember { mutableStateOf(0f) }
     val tm = rememberTextMeasurer()
@@ -894,6 +900,8 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                 FilterChip(selected = showSnr1, onClick = { showSnr1 = !showSnr1 }, label = { Text("SNRC1") })
                 FilterChip(selected = showSnr2, onClick = { showSnr2 = !showSnr2 }, label = { Text("SNRC2") })
                 FilterChip(selected = showSnr3, onClick = { showSnr3 = !showSnr3 }, label = { Text("SNRC3") })
+                FilterChip(selected = showHy1, onClick = { showHy1 = !showHy1 }, label = { Text("Hybrid 1") })
+                FilterChip(selected = showHy2, onClick = { showHy2 = !showHy2 }, label = { Text("Hybrid 2") })
             }
 
             // Entrées affichées : proches (2 ATR au plus) sauf si « Lointaines » est actif
@@ -901,7 +909,8 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                 if (showEntries) d.entries.filter { showFar || it.distAtr <= 2.0 } else emptyList()
 
             // Setups QM et SNRC : seulement ceux dont le bouton est actif (3 plus récents par famille)
-            val anySetup = showQmr || showQmc || showQmm || showQm2p || showSnr1 || showSnr2 || showSnr3
+            val anySetup = showQmr || showQmc || showQmm || showQm2p || showSnr1 || showSnr2 || showSnr3 ||
+                showHy1 || showHy2
             val qmShown: List<QmSetup> = d.qm.filter { q ->
                 (showQmr && QmType.QMR in q.types) || (showQmc && QmType.QMC in q.types) ||
                     (showQmm && QmType.QMM in q.types) || (showQm2p && QmType.QM2P in q.types)
@@ -909,6 +918,9 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
             val snrShown: List<SnrSetup> = d.snr.filter { sn ->
                 (showSnr1 && sn.type == SnrType.SNRC1) || (showSnr2 && sn.type == SnrType.SNRC2) ||
                     (showSnr3 && sn.type == SnrType.SNRC3)
+            }.take(3)
+            val hybShown: List<HybridSetup> = d.hyb.filter { hy ->
+                (showHy1 && hy.type == HybridType.HYBRID1) || (showHy2 && hy.type == HybridType.HYBRID2)
             }.take(3)
 
             // Profil de volume à plage fixe : calculé sur les dernières bougies, il ne bouge pas avec le défilement
@@ -1006,6 +1018,12 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                         lo = min(lo, p)
                     }
                 }
+                for (hy in hybShown) {
+                    for (p in listOf(hy.entry, hy.stopLoss, hy.tp1)) {
+                        hi = max(hi, p)
+                        lo = min(lo, p)
+                    }
+                }
                 val pad = (hi - lo) * 0.05
                 hi += pad
                 lo -= pad
@@ -1048,6 +1066,11 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                     specials.add(sn.entry)
                     specials.add(sn.stopLoss)
                     specials.add(sn.tp1)
+                }
+                for (hy in hybShown) {
+                    specials.add(hy.entry)
+                    specials.add(hy.stopLoss)
+                    specials.add(hy.tp1)
                 }
                 if (fibOn) for (r in fibRatios) specials.add(fibPrice(r))
                 if (vp != null) {
@@ -1415,6 +1438,43 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                     )
                 }
 
+                // Hybrid 1 et Hybrid 2 : lignes de tendance, zone de danger, zone d'entrée, stop et cibles
+                for (hy in hybShown) {
+                    if (hy.refIdx >= end) continue
+                    val sellH = hy.direction == QmDirection.SELL
+                    val hcol = if (sellH) red else green
+                    val dangerCol = Color(0xFFFF4081)
+                    if (hy.dangerHigh >= lo && hy.dangerLow <= hi) {
+                        val dTop = y(hy.dangerHigh)
+                        val dH = max(y(hy.dangerLow) - dTop, 2f)
+                        drawRect(dangerCol.copy(alpha = 0.10f), topLeft = Offset(0f, dTop), size = Size(plotW, dH))
+                        drawRect(dangerCol, topLeft = Offset(0f, dTop), size = Size(plotW, dH), style = Stroke(width = 2f))
+                        setupTag("Danger Zone", dangerCol, 4f, dTop + 2f)
+                    }
+                    fun trendLine(l: HLine, col: Color) {
+                        if (l.i1 >= end) return
+                        val ie = n - 1
+                        drawLine(col, Offset(x(l.i1), y(l.p1)), Offset(x(ie), y(l.at(ie))), strokeWidth = 3f)
+                    }
+                    trendLine(hy.line1, Color(0xFFFFD54F))
+                    val ln2 = hy.line2
+                    if (ln2 != null) trendLine(ln2, Color(0xFF90A4AE))
+                    val xz = if (hy.refIdx < start) 0f else x(hy.refIdx)
+                    drawRect(
+                        hcol.copy(alpha = 0.18f),
+                        topLeft = Offset(xz, y(hy.zoneHigh)),
+                        size = Size(plotW - xz, max(y(hy.zoneLow) - y(hy.zoneHigh), 2f))
+                    )
+                    setupLines(xz, hy.entry, hy.stopLoss, hy.tp1, hy.tp2)
+                    setupTag(
+                        (if (hy.type == HybridType.HYBRID1) "Hybrid 1" else "Hybrid 2") +
+                            (if (sellH) " vente" else " achat") + (if (hy.via.isEmpty()) "" else " · " + hy.via),
+                        hcol,
+                        xz + 4f,
+                        if (sellH) y(hy.zoneHigh) - 16f else y(hy.zoneLow) + 3f
+                    )
+                }
+
                 // Lignes des doubles sommets / creux
                 if (showDouble) {
                     for (pl in d.patLines) {
@@ -1589,6 +1649,11 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                     label(sn.stopLoss, Color.White, Color(0xFFB71C1C))
                     label(sn.entry, Color.Black, entryBlue)
                 }
+                for (hy in hybShown) {
+                    label(hy.tp1, Color.White, Color(0xFF1B5E20))
+                    label(hy.stopLoss, Color.White, Color(0xFFB71C1C))
+                    label(hy.entry, Color.Black, entryBlue)
+                }
                 if (tp2P != null) label(tp2P, Color.Black, tealTp2)
                 if (tp1P != null) label(tp1P, Color.Black, green)
                 if (slP != null) label(slP, Color.White, red)
@@ -1652,7 +1717,7 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
 
             // Détail des setups QM et SNRC
             if (anySetup) {
-                if (qmShown.isEmpty() && snrShown.isEmpty()) {
+                if (qmShown.isEmpty() && snrShown.isEmpty() && hybShown.isEmpty()) {
                     Text(
                         "Aucun setup actif et proche (5 ATR au plus) pour les boutons choisis sur ce marché.",
                         fontSize = 13.sp,
@@ -1688,6 +1753,27 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                     )
                     Text(
                         if (sn.status == QmStatus.TRIGGERED) "Niveau déjà testé" else "En attente du test du niveau",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                for (hy in hybShown) {
+                    val sellH = hy.direction == QmDirection.SELL
+                    val h1 = hy.type == HybridType.HYBRID1
+                    Text(
+                        (if (h1) "Hybrid 1" else "Hybrid 2") + (if (sellH) " vente" else " achat") +
+                            " · Entrée " + fmtPrice(hy.entry, dec) +
+                            " · SL " + fmtPrice(hy.stopLoss, dec) + " · TP1 " + fmtPrice(hy.tp1, dec) +
+                            " · TP2 " + fmtPrice(hy.tp2, dec) + " · R/R " + String.format(Locale.US, "%.1f", hy.rr),
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = if (sellH) red else green
+                    )
+                    Text(
+                        (if (h1) "Ligne de tendance cassée puis retest sur " + hy.via
+                        else "Ligne montante cassée, retour sur la ligne descendante" +
+                            (if (hy.via.isEmpty()) "" else " · retournement : " + hy.via)) +
+                            " · " + (if (hy.status == QmStatus.TRIGGERED) "entrée déjà touchée" else "en attente de l'entrée"),
                         fontSize = 11.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -1764,6 +1850,10 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
             if (anySetup) {
                 legend += "Setups : zone colorée = entrée, trait épais = structure (épaule, base, tête, cassure), " +
                     "bleu = entrée, rouge = SL, vert = TP1, turquoise = TP2. Setups actifs seulement · "
+            }
+            if (showHy1 || showHy2) {
+                legend += "Hybrid : ligne jaune = ligne de tendance, ligne grise = tendance précédente (Hybrid 2), " +
+                    "rose = Danger Zone (le prix ne doit pas l'avoir touchée) · "
             }
             if (legend.isNotEmpty()) {
                 Text(legend.removeSuffix(" · "), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
