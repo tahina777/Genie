@@ -738,6 +738,7 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
     var showInside by remember { mutableStateOf(false) }
     var showStar by remember { mutableStateOf(false) }
     var showDouble by remember { mutableStateOf(false) }
+    var showFig by remember { mutableStateOf(false) }
     var showQmr by remember { mutableStateOf(false) }
     var showQmc by remember { mutableStateOf(false) }
     var showQmm by remember { mutableStateOf(false) }
@@ -879,6 +880,7 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                 FilterChip(selected = showInside, onClick = { showInside = !showInside }, label = { Text("Inside bar") })
                 FilterChip(selected = showStar, onClick = { showStar = !showStar }, label = { Text("Étoile") })
                 FilterChip(selected = showDouble, onClick = { showDouble = !showDouble }, label = { Text("Double top/bottom") })
+                FilterChip(selected = showFig, onClick = { showFig = !showFig }, label = { Text("Figures") })
             }
             // Rangée 5 : setups de la fiche (QM et SNRC)
             Row(
@@ -911,6 +913,9 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
 
             // Profil de volume à plage fixe : calculé sur les dernières bougies, il ne bouge pas avec le défilement
             val vpData = remember(d, vpRange) { buildVp(d.c, vpRange, 40) }
+
+            // Figures chartistes : lignes de tendance, triangles, biseaux, épaule-tête-épaule...
+            val figs = remember(d) { TrendFigures.build(d.c) }
 
             Canvas(
                 modifier = Modifier
@@ -1424,6 +1429,36 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                     }
                 }
 
+                // Figures chartistes : lignes de tendance prolongées jusqu'à la dernière bougie
+                if (showFig) {
+                    for (f in figs) {
+                        val fc = if (f.buy == true) green else if (f.buy == false) red else Color(0xFF90A4AE)
+                        for (ln in f.lines) {
+                            if (ln.i1 >= end) continue
+                            drawLine(
+                                fc.copy(alpha = if (ln.guide) 0.55f else 0.95f),
+                                Offset(x(ln.i1), y(ln.p1)),
+                                Offset(x(ln.i2), y(ln.p2)),
+                                strokeWidth = if (ln.guide) 1.5f else 3f,
+                                pathEffect = if (ln.guide) PathEffect.dashPathEffect(floatArrayOf(6f, 6f)) else null
+                            )
+                        }
+                        val first = f.lines.firstOrNull { !it.guide } ?: continue
+                        val lay = tm.measure(
+                            f.name + " · " + f.status,
+                            TextStyle(color = fc, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                        )
+                        val lx = max(4f, min(x(first.i1), plotW - lay.size.width - 6f))
+                        val ly = (y(first.p1) - lay.size.height - 6f).coerceIn(0f, max(0f, h - lay.size.height))
+                        drawRect(
+                            Color(0xFF0E1117).copy(alpha = 0.8f),
+                            topLeft = Offset(lx, ly),
+                            size = Size(lay.size.width.toFloat() + 4f, lay.size.height.toFloat())
+                        )
+                        drawText(lay, topLeft = Offset(lx + 2f, ly))
+                    }
+                }
+
                 // Marques BBMA, sweeps et patterns, empilées sous (haussier) ou au-dessus (baissier) de la bougie
                 fun kindOn(kind: Char): Boolean = when (kind) {
                     'E' -> showE
@@ -1694,6 +1729,10 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
             if (showZones) legend += "Zones : fond vert = discount, fond rouge = premium, bloc coloré = zone SMC · "
             if (showSd) legend += "Supply/Demand : bordure verte = demande, rouge = offre, orange pointillé = zone déjà testée · "
             if (showSr) legend += "S/R : lignes épaisses (plus épaisse = niveau plus souvent respecté), vert clair = support, orange = résistance · "
+            if (showFig) {
+                legend += "Figures : lignes de tendance tracées sur les derniers sommets et creux (vert = haussier, rouge = baissier, gris = neutre), " +
+                    "prolongées jusqu'à la dernière bougie pour voir la cassure · "
+            }
             if (showFib) {
                 legend += "Fibonacci : retracement du plus grand mouvement visible (0 % = extrême le plus récent, 100 % = départ du mouvement), " +
                     "zone rose = 50 à 61,8 %. Il change si tu zoomes ou fais défiler · "
