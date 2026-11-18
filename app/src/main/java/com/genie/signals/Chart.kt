@@ -1443,13 +1443,13 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                                 pathEffect = if (ln.guide) PathEffect.dashPathEffect(floatArrayOf(6f, 6f)) else null
                             )
                         }
-                        val first = f.lines.firstOrNull { !it.guide } ?: continue
                         val lay = tm.measure(
                             f.name + " · " + f.status,
                             TextStyle(color = fc, fontSize = 9.sp, fontWeight = FontWeight.Bold)
                         )
-                        val lx = max(4f, min(x(first.i1), plotW - lay.size.width - 6f))
-                        val ly = (y(first.p1) - lay.size.height - 6f).coerceIn(0f, max(0f, h - lay.size.height))
+                        // étiquette fixe en haut à gauche, loin des marques des bougies
+                        val lx = 4f
+                        val ly = 4f
                         drawRect(
                             Color(0xFF0E1117).copy(alpha = 0.8f),
                             topLeft = Offset(lx, ly),
