@@ -15,7 +15,7 @@ import java.util.Locale
 import kotlin.math.abs
 
 /**
- * Alertes des setups de la fiche : QMR, QMC, QMM, QM2P (QmSetups.kt), SNRC1/2/3 (SnrSetups.kt) et Hybrid 1/2 (HybridSetups.kt).
+ * Alertes des setups de la fiche : QMR, QMC, QMM, QM2P (QmSetups.kt), SNRC1/2/3 (SnrSetups.kt) et Hybrid 1/2 (HybridSetups.kt) et RBR/DBD/RBD/DBR (BaseSetups.kt).
  * Appelé par ZoneService à chaque clôture : prévient quand un setup récent apparaît (en attente d'entrée)
  * et quand son entrée est touchée. Une alerte par setup et par changement d'état.
  */
@@ -77,6 +77,18 @@ object SetupAlerts {
             items.add(
                 Item(
                     nm, s.direction, c[s.refIdx].time, s.status,
+                    s.zoneLow, s.zoneHigh, s.entry, s.stopLoss, s.tp1, s.tp2, s.rr
+                )
+            )
+        }
+
+        for (s in BaseSetups.detect(qcs)) {
+            val ref = s.retestIdx ?: s.legOutIdx
+            if (ref < n - 4) continue // seulement les zones récentes ou en premier retest
+            if (abs(s.entry - last) > 5.0 * atr) continue
+            items.add(
+                Item(
+                    s.type.name, s.direction, c[s.legOutIdx].time, s.status,
                     s.zoneLow, s.zoneHigh, s.entry, s.stopLoss, s.tp1, s.tp2, s.rr
                 )
             )
