@@ -215,12 +215,18 @@ class ZoneService : Service() {
     private suspend fun rebuild(): Boolean = coroutineScope {
         val old = zones
         val gate = Semaphore(4)
+        val structs = java.util.concurrent.ConcurrentHashMap<String, StructureState>()
         val jobs = ALL_MARKETS.flatMap { m ->
             frames.map { tf ->
                 async {
                     gate.withPermit {
                         try {
                             val raw = Deriv.candles(m.code, tf.seconds, 300)
+                            try {
+                                structs[m.code + "|" + tf.label] = MarketStructure.analyze(tf.label, raw)
+                            } catch (e: Exception) {
+                                // structure indisponible pour ce timeframe
+                            }
                             // Confirmation : la bougie qui vient de se fermer a-t-elle réagi dans une zone surveillée ?
                             try {
                                 val mine = old.filter { it.market.code == m.code && it.tf == tf }
@@ -253,6 +259,18 @@ class ZoneService : Service() {
             }
         }
         val results = jobs.awaitAll()
+        // Alerte d'alignement de la structure D1 / H4 / H1
+        for (m in ALL_MARKETS) {
+            val a = structs[m.code + "|D1"]
+            val b = structs[m.code + "|H4"]
+            val c = structs[m.code + "|H1"]
+            if (a == null || b == null || c == null) continue
+            try {
+                StructureAlerts.check(this@ZoneService, m, a, b, c)
+            } catch (e: Exception) {
+                // une erreur d'alerte ne doit pas bloquer le calcul des zones
+            }
+        }
         val all = results.flatMap { it.list }
         zones = all
         updateNotification(all.size)
