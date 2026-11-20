@@ -97,6 +97,35 @@ private class ChartZone(val low: Double, val high: Double, val buy: Boolean)
 private class SrLevel(val price: Double, val touches: Int)
 
 /** Zone de Supply (offre) ou Demand (demande). tested = le prix l'a déjà retouchée sans la casser. */
+private class Swing(val i: Int, val price: Double, val high: Boolean, val label: String)
+
+/** Sommets et creux (fractals de 3 bougies de chaque côté), étiquetés par rapport au précédent du même type. */
+private fun buildSwings(c: List<Candle>): List<Swing> {
+    val k = 3
+    val out = ArrayList<Swing>()
+    var prevH: Double? = null
+    var prevL: Double? = null
+    for (i in k until c.size - k) {
+        var h = true
+        var l = true
+        for (j in 1..k) {
+            if (c[i].high <= c[i - j].high || c[i].high < c[i + j].high) h = false
+            if (c[i].low >= c[i - j].low || c[i].low > c[i + j].low) l = false
+        }
+        if (h) {
+            val p = prevH
+            out.add(Swing(i, c[i].high, true, if (p == null) "H" else if (c[i].high > p) "HH" else "LH"))
+            prevH = c[i].high
+        }
+        if (l) {
+            val p = prevL
+            out.add(Swing(i, c[i].low, false, if (p == null) "L" else if (c[i].low > p) "HL" else "LL"))
+            prevL = c[i].low
+        }
+    }
+    return out
+}
+
 private class SdBox(val low: Double, val high: Double, val buy: Boolean, val startIdx: Int, val tested: Boolean)
 
 /** Profil temps/prix à plage fixe : poids de chaque tranche de prix, POC et zone de valeur. */
@@ -747,6 +776,7 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
     var showStar by remember { mutableStateOf(false) }
     var showDouble by remember { mutableStateOf(false) }
     var showFig by remember { mutableStateOf(false) }
+    var showSw by remember { mutableStateOf(false) }
     var showQmr by remember { mutableStateOf(false) }
     var showQmc by remember { mutableStateOf(false) }
     var showQmm by remember { mutableStateOf(false) }
@@ -931,6 +961,7 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                 FilterChip(selected = showStar, onClick = { showStar = !showStar }, label = { Text("Étoile") })
                 FilterChip(selected = showDouble, onClick = { showDouble = !showDouble }, label = { Text("Double top/bottom") })
                 FilterChip(selected = showFig, onClick = { showFig = !showFig }, label = { Text("Figures") })
+                FilterChip(selected = showSw, onClick = { showSw = !showSw }, label = { Text("HH/HL/LH/LL") })
             }
             // Rangée 5 : setups de la fiche (QM et SNRC)
             Row(
@@ -980,6 +1011,9 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
 
             // Figures chartistes : lignes de tendance, triangles, biseaux, épaule-tête-épaule...
             val figs = remember(d) { TrendFigures.build(d.c) }
+
+            // Structure de marché : sommets et creux étiquetés H/L, HH, HL, LH, LL
+            val swings = remember(d) { buildSwings(d.c) }
 
             Canvas(
                 modifier = Modifier
@@ -1565,6 +1599,21 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                     )
                 }
 
+                // Structure de marché : étiquettes HH / HL / LH / LL
+                if (showSw) {
+                    for (sw in swings) {
+                        if (sw.i < start || sw.i >= end) continue
+                        val up = sw.label == "HH" || sw.label == "HL"
+                        val dn = sw.label == "LH" || sw.label == "LL"
+                        val col = if (up) green else if (dn) red else neutralGray
+                        val lay = tm.measure(sw.label, TextStyle(color = col, fontSize = 10.sp, fontWeight = FontWeight.Bold))
+                        val px = x(sw.i) - lay.size.width / 2f
+                        val py = if (sw.high) y(sw.price) - lay.size.height - 4f else y(sw.price) + 4f
+                        drawCircle(col, radius = 3f, center = Offset(x(sw.i), y(sw.price)))
+                        drawText(lay, topLeft = Offset(px, py))
+                    }
+                }
+
                 // Lignes des doubles sommets / creux
                 if (showDouble) {
                     for (pl in d.patLines) {
@@ -1950,6 +1999,9 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
             if (showCs) legend += "Points : CSM (magenta, gros), CSAK (orange) · "
             if (showCsa) legend += "CSA (gris, petit) · "
             if (showLiq) legend += "Liquidité : EQH/EQL = hauts/bas égaux, Liq. haute/basse = niveaux non touchés, S = sweep · "
+            if (showSw) {
+                legend += "Structure : HH = sommet plus haut, HL = creux plus haut (haussier), LH = sommet plus bas, LL = creux plus bas (baissier), H/L = premier point · "
+            }
             if (showEng || showPin || showDoji || showInside || showStar || showDouble) {
                 legend += "Patterns : "
                 if (showEng) legend += "EN = Engulfing  "
