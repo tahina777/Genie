@@ -1896,7 +1896,11 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                         color = if (sellS) red else green
                     )
                     Text(
-                        if (sn.status == QmStatus.TRIGGERED) "Niveau déjà testé" else "En attente du test du niveau",
+                        (if (sn.type == SnrType.SNRC1) (if (sellS) "DBD" else "RBR") + " au niveau · "
+                        else if (sn.type == SnrType.SNRC2) (if (sellS) "RBD" else "DBR") + " avant la cassure · "
+                        else (if (sellS) "Failed Bullish Engulfing + Bearish Engulfing" else "Failed Bearish Engulfing + Bullish Engulfing") + " · ") +
+                            (if (sn.status == QmStatus.TRIGGERED) "niveau déjà testé" else "en attente du test du niveau") +
+                            " · confirmation HTF à vérifier à la main",
                         fontSize = 11.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
