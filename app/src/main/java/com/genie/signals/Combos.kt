@@ -16,7 +16,7 @@ enum class BbState(val letter: Char, val label: String) {
     REENTRY('R', "Re-entry")
 }
 
-class TfState(val tf: Tf, val state: BbState, val dir: Direction)
+class TfState(val tf: Tf, val state: BbState, val dir: Direction, val sub: String = "", val csak: Boolean = false)
 
 class ComboMatch(val code: String, val dir: Direction, val states: List<TfState>)
 
@@ -24,12 +24,19 @@ class ComboMatch(val code: String, val dir: Direction, val states: List<TfState>
  * Combos BBMA sur 3 timeframes, lus du plus grand au plus petit.
  * R = Re-entry, E = Extrême, M = MHV. Codes : REE, RME, REM, RRE, RMM.
  * Les 3 timeframes doivent aller dans le même sens (tous vente ou tous achat).
+ * Le plus grand timeframe est en Re-entry (MA, Mid BB ou ZZL). En descendant sur les plus petits,
+ * un Extrême ou un MHV doit être accompagné d'une bougie CSAK dans le même sens.
  */
 object Combos {
-    /** Une seule série : D1 · H4 · H1 (H4 · H1 · M15 a été retirée). */
+    /** Séries : D1 · H4 · H1, H4 · H1 · M15 et H1 · M15 · M5. */
     val TRIPLES: List<List<Tf>> = listOf(
-        listOf(Tf.D1, Tf.H4, Tf.H1)
+        listOf(Tf.D1, Tf.H4, Tf.H1),
+        listOf(Tf.H4, Tf.H1, Tf.M15),
+        listOf(Tf.H1, Tf.M15, Tf.M5)
     )
+
+    /** Sur les timeframes plus petits que le premier, Extrême et MHV exigent une bougie CSAK. */
+    private const val REQUIRE_CSAK = true
 
     private val VALID = setOf("REE", "RME", "REM", "RRE", "RMM")
 
@@ -57,17 +64,21 @@ object Combos {
         }.awaitAll().filterNotNull()
     }
 
-    private fun stateOf(tf: Tf, c: List<Candle>): TfState? {
+    private fun stateOf(tf: Tf, c: List<Candle>, needCsak: Boolean): TfState? {
         val b = BbmaCalc(c)
+        val mk = b.marks()
         val hit = b.detect()
         if (hit != null) {
             val st = if (hit.setup.contains("MHV")) BbState.MHV else BbState.REENTRY
-            return TfState(tf, st, hit.dir)
+            val csak = mk.candle == "CSAK" && mk.candleDir == hit.dir
+            if (needCsak && st == BbState.MHV && !csak) return null
+            return TfState(tf, st, hit.dir, if (st == BbState.REENTRY) hit.sub else "", csak)
         }
-        val mk = b.marks()
         val ext = mk.extreme
         if (ext != null && mk.extremeAgo <= EXTREME_MAX_AGE) {
-            return TfState(tf, BbState.EXTREME, ext)
+            val csak = mk.candle == "CSAK" && mk.candleDir == ext
+            if (needCsak && !csak) return null
+            return TfState(tf, BbState.EXTREME, ext, "", csak)
         }
         return null
     }
@@ -79,7 +90,7 @@ object Combos {
     fun match(closed: List<List<Candle>>, triple: List<Tf>): ComboMatch? {
         val states = arrayOfNulls<TfState>(triple.size)
         for (i in triple.indices.reversed()) {
-            states[i] = stateOf(triple[i], closed[i]) ?: return null
+            states[i] = stateOf(triple[i], closed[i], REQUIRE_CSAK && i > 0) ?: return null
         }
         val list = states.map { it!! }
         val dir = list[0].dir
@@ -142,7 +153,11 @@ object Combos {
         val reasons = ArrayList<String>()
         reasons.add("Combo BBMA " + mt.code + " sur " + names + " : même sens sur les 3 timeframes")
         for (s in mt.states) {
-            reasons.add(s.tf.label + " : " + s.state.label + (if (dir == Direction.BUY) " achat" else " vente"))
+            val nm = if (s.state == BbState.REENTRY && s.sub.isNotEmpty()) s.sub else s.state.label
+            reasons.add(
+                s.tf.label + " : " + nm + (if (dir == Direction.BUY) " achat" else " vente") +
+                    (if (s.csak) " + CSAK" else "")
+            )
         }
         return Signal(
             m, small, dir, "Combo " + mt.code + " " + names,
