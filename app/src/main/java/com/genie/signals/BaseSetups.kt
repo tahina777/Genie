@@ -153,18 +153,19 @@ object BaseSetups {
         b0: Int, b1: Int, k: Int, lo: Double, hi: Double
     ): BaseSetup? {
         val n = c.size
+        val entry = hi
+        val sl = lo - cfg.slBufferAtr * atr[k]
+        val risk = entry - sl
+        if (risk <= 0.0) return null
+
         // zone fraîche : pas encore retestée, ou premier retest sur les 2 dernières bougies
         var retest = -1
         for (m in k + 1 until n) {
             if (c[m].close < lo) return null // zone cassée
             if (c[m].low <= hi) { retest = m; break }
+            if (c[m].high >= entry + 1.5 * risk) return null // déjà parti sans retest : périmé
         }
         if (retest >= 0 && retest < n - 2) return null // déjà utilisée
-
-        val entry = hi
-        val sl = lo - cfg.slBufferAtr * atr[k]
-        val risk = entry - sl
-        if (risk <= 0.0) return null
         return BaseSetup(
             type, QmDirection.BUY, b0, b1, k, lo, hi, entry, sl,
             entry + 1.5 * risk, entry + 3.0 * risk, 3.0,
