@@ -141,11 +141,75 @@ private class VpResult(
 
 /**
  * Marque sur une bougie. kind :
- * E = Extrême, M = MHV, R = Re-entry, 1 = CSM, 2 = CSAK, 3 = CSA, S = sweep de liquidité,
+ * E = Extrême, M = MHV, R = Re-entry Mid, N = Re-entry MA5/10, Z = ZZL, 1 = CSM, 2 = CSAK, 3 = CSA, S = sweep de liquidité,
  * G = Engulfing, P = Pin bar, D = Doji, I = Inside bar, T = Étoile du matin/soir, W = Double sommet/creux.
  * buy = true : marque haussière, dessinée sous la bougie ; false : au-dessus.
  */
 private class Mark(val idx: Int, val kind: Char, val buy: Boolean)
+
+/** Re-entry BBMA (MA, Mid BB ou ZZL) : zone de la mèche, entrée à la clôture, stop au-delà de la mèche. */
+private class ReSetup(
+    val idx: Int,
+    val kind: Char,
+    val buy: Boolean,
+    val zoneLow: Double,
+    val zoneHigh: Double,
+    val entry: Double,
+    val sl: Double,
+    val tp1: Double,
+    val tp2: Double
+)
+
+private fun buildReSetup(c: List<Candle>, marks: List<Mark>, atr: Double): List<ReSetup> {
+    val n = c.size
+    if (atr <= 0.0 || n < 60) return emptyList()
+    var best: Mark? = null
+    for (mk in marks) {
+        if (mk.kind != 'N' && mk.kind != 'R' && mk.kind != 'Z') continue
+        if (mk.idx < n - 30 || mk.idx >= n - 1) continue
+        if (best == null || mk.idx > best.idx) best = mk
+    }
+    val m = best ?: return emptyList()
+    val cd = c[m.idx]
+    val entry = cd.close
+    val sl = if (m.buy) cd.low - 0.3 * atr else cd.high + 0.3 * atr
+    val risk = abs(entry - sl)
+    if (risk < 0.5 * atr || risk > 4 * atr) return emptyList()
+    val sign = if (m.buy) 1.0 else -1.0
+    val tp1 = entry + sign * 1.5 * risk
+    val tp2 = entry + sign * 3.0 * risk
+    // Déjà terminé : stop ou TP1 touché depuis
+    for (k in m.idx + 1 until n) {
+        if (m.buy && (c[k].low <= sl || c[k].high >= tp1)) return emptyList()
+        if (!m.buy && (c[k].high >= sl || c[k].low <= tp1)) return emptyList()
+    }
+    val bodyEdge = if (m.buy) min(cd.open, cd.close) else max(cd.open, cd.close)
+    val zl = if (m.buy) cd.low else bodyEdge
+    val zh = if (m.buy) bodyEdge else cd.high
+    return listOf(ReSetup(m.idx, m.kind, m.buy, zl, zh, entry, sl, tp1, tp2))
+}
+
+/** État BBMA d'un timeframe sur la dernière bougie terminée, pour la ligne multi timeframe. */
+private fun bbmaTfText(tf: Tf, closed: List<Candle>): String {
+    if (closed.size < 60) return tf.label + " : —"
+    val b = BbmaCalc(closed)
+    val mk = b.marks()
+    val hit = b.detect()
+    var dir: Direction? = null
+    val st: String
+    if (hit != null) {
+        dir = hit.dir
+        st = if (hit.setup.contains("MHV")) "MHV" else hit.sub.ifEmpty { "Re-entry" }
+    } else if (mk.extreme != null) {
+        dir = mk.extreme
+        st = if (mk.extremeAgo == 0) "Extrême" else "Extrême (il y a " + mk.extremeAgo + ")"
+    } else {
+        return tf.label + " : —"
+    }
+    val arrow = if (dir == Direction.BUY) "▲" else "▼"
+    val csak = if (mk.candle == "CSAK" && mk.candleDir == dir) " + CSAK" else ""
+    return tf.label + " : " + st + " " + arrow + csak
+}
 
 private class LiqLine(val price: Double, val fromIdx: Int, val label: String, val high: Boolean)
 
@@ -175,7 +239,8 @@ private class ChartData(
     val snr: List<SnrSetup>,
     val hyb: List<HybridSetup>,
     val base: List<BaseSetup>,
-    val pat: List<PatSetup>
+    val pat: List<PatSetup>,
+    val re: List<ReSetup>
 )
 
 private fun fmtPrice(v: Double, d: Int): String =
@@ -189,6 +254,9 @@ private fun markText(kind: Char, buy: Boolean): String = when (kind) {
     'I' -> "IB"
     'T' -> "ST"
     'W' -> if (buy) "DC" else "DS"
+    'N' -> "RMA"
+    'R' -> "RMB"
+    'Z' -> "ZZL"
     else -> kind.toString()
 }
 
@@ -339,7 +407,7 @@ private fun marksLine(c: List<Candle>): String? {
             val side = if (ext == Direction.SELL) "Extrême haut" else "Extrême bas"
             parts.add(if (mk.extremeAgo == 0) side else side + " (il y a " + mk.extremeAgo + " bougies)")
         }
-        if (hit != null) parts.add(if (hit.setup.contains("MHV")) "MHV" else "Re-entry")
+        if (hit != null) parts.add(if (hit.setup.contains("MHV")) "MHV" else hit.sub.ifEmpty { "Re-entry" })
         val cn = mk.candle
         val cd = mk.candleDir
         if (cn != null && cd != null) {
@@ -394,17 +462,15 @@ private fun buildBbmaMarks(
                 if (cur.high > up[i] && m5h[i] <= up[i] && cur.close < up[i]) {
                     out.add(Mark(i, 'M', false))
                 } else {
-                    var went = false
-                    for (k in e + 1 until i) if (c[k].close < mid[k]) went = true
-                    if (went && cur.high >= mid[i] && cur.close < mid[i]) out.add(Mark(i, 'R', false))
+                    val rk = bbmaReentryKind(c, mid, m5h, m10h, m5l, m10l, i, e, true)
+                    if (rk > 0) out.add(Mark(i, if (rk == 1) 'N' else if (rk == 2) 'R' else 'Z', false))
                 }
             } else {
                 if (cur.low < low[i] && m5l[i] >= low[i] && cur.close > low[i]) {
                     out.add(Mark(i, 'M', true))
                 } else {
-                    var went = false
-                    for (k in e + 1 until i) if (c[k].close > mid[k]) went = true
-                    if (went && cur.low <= mid[i] && cur.close > mid[i]) out.add(Mark(i, 'R', true))
+                    val rk = bbmaReentryKind(c, mid, m5h, m10h, m5l, m10l, i, e, false)
+                    if (rk > 0) out.add(Mark(i, if (rk == 1) 'N' else if (rk == 2) 'R' else 'Z', true))
                 }
             }
         }
@@ -748,7 +814,8 @@ private fun buildData(c: List<Candle>, htf: List<Candle>?): ChartData {
         snr = snr,
         hyb = hyb,
         base = base,
-        pat = pat
+        pat = pat,
+        re = try { buildReSetup(c, marks, atr) } catch (e: Exception) { emptyList() }
     )
 }
 
@@ -771,6 +838,8 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
     var showE by remember { mutableStateOf(false) }
     var showM by remember { mutableStateOf(false) }
     var showR by remember { mutableStateOf(false) }
+    var showRma by remember { mutableStateOf(false) }
+    var showZzl by remember { mutableStateOf(false) }
     var showCs by remember { mutableStateOf(false) }
     var showCsa by remember { mutableStateOf(false) }
     var showEng by remember { mutableStateOf(false) }
@@ -817,6 +886,43 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
             }
         }
         structs = res
+    }
+
+    // BBMA multi timeframe : D1, H4, H1, M15, M5 et combos (REE, RME, REM, RRE, RMM)
+    var bbmaTfs by remember(spec) { mutableStateOf<List<String>>(emptyList()) }
+    var bbmaCombos by remember(spec) { mutableStateOf<List<String>>(emptyList()) }
+    LaunchedEffect(spec) {
+        val closedMap = HashMap<Tf, List<Candle>>()
+        val texts = ArrayList<String>()
+        for (t in listOf(Tf.D1, Tf.H4, Tf.H1, Tf.M15, Tf.M5)) {
+            try {
+                val raw = Deriv.candles(spec.code, t.seconds, 300)
+                val closed = raw.dropLast(1)
+                closedMap[t] = closed
+                texts.add(bbmaTfText(t, closed))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // on saute ce timeframe
+            }
+        }
+        val combos = ArrayList<String>()
+        for (tr in Combos.TRIPLES) {
+            try {
+                if (tr.any { closedMap[it] == null }) continue
+                val mt = Combos.match(tr.map { closedMap[it]!! }, tr) ?: continue
+                combos.add(
+                    "Combo " + mt.code + " " + tr.joinToString(" · ") { it.label } +
+                        (if (mt.dir == Direction.BUY) " achat" else " vente")
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // série indisponible
+            }
+        }
+        bbmaTfs = texts
+        bbmaCombos = combos
     }
 
     LaunchedEffect(spec) {
@@ -901,6 +1007,17 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
             )
         }
 
+        if (bbmaTfs.isNotEmpty()) {
+            Text(
+                "BBMA · " + bbmaTfs.joinToString(" · "),
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            for (cm in bbmaCombos) {
+                Text(cm, fontSize = 12.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+            }
+        }
+
         val d = data
         val err = error
         if (d == null) {
@@ -953,7 +1070,9 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
             ) {
                 FilterChip(selected = showE, onClick = { showE = !showE }, label = { Text("Extrême") })
                 FilterChip(selected = showM, onClick = { showM = !showM }, label = { Text("MHV") })
-                FilterChip(selected = showR, onClick = { showR = !showR }, label = { Text("Re-entry") })
+                FilterChip(selected = showRma, onClick = { showRma = !showRma }, label = { Text("Re-entry MA") })
+                FilterChip(selected = showR, onClick = { showR = !showR }, label = { Text("Re-entry Mid") })
+                FilterChip(selected = showZzl, onClick = { showZzl = !showZzl }, label = { Text("ZZL") })
                 FilterChip(selected = showCs, onClick = { showCs = !showCs }, label = { Text("CSM/CSAK") })
                 FilterChip(selected = showCsa, onClick = { showCsa = !showCsa }, label = { Text("CSA") })
             }
@@ -1022,6 +1141,9 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                 (showBs1 && pt.type == PatType.BS1) || (showBs2 && pt.type == PatType.BS2) ||
                     (showCk1 && pt.type == PatType.CK1) || (showCk2 && pt.type == PatType.CK2)
             }.take(4)
+            val reShown: List<ReSetup> = d.re.filter { rs ->
+                (rs.kind == 'N' && showRma) || (rs.kind == 'R' && showR) || (rs.kind == 'Z' && showZzl)
+            }
 
             // Profil de volume à plage fixe : calculé sur les dernières bougies, il ne bouge pas avec le défilement
             val vpData = remember(d, vpRange) { buildVp(d.c, vpRange, 40) }
@@ -1139,6 +1261,12 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                         lo = min(lo, p)
                     }
                 }
+                for (rs in reShown) {
+                    for (p in listOf(rs.entry, rs.sl, rs.tp1)) {
+                        hi = max(hi, p)
+                        lo = min(lo, p)
+                    }
+                }
                 val pad = (hi - lo) * 0.05
                 hi += pad
                 lo -= pad
@@ -1191,6 +1319,11 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                     specials.add(bs.entry)
                     specials.add(bs.stopLoss)
                     specials.add(bs.tp1)
+                }
+                for (rs in reShown) {
+                    specials.add(rs.entry)
+                    specials.add(rs.sl)
+                    specials.add(rs.tp1)
                 }
                 for (pt in patShown) {
                     specials.add(pt.entry)
@@ -1627,6 +1760,25 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                     )
                 }
 
+                // Re-entry MA / Mid BB / ZZL : zone de la mèche, entrée, stop et cibles
+                for (rs in reShown) {
+                    if (rs.idx >= end) continue
+                    val rcol = if (rs.buy) green else red
+                    val xr0 = if (rs.idx - 1 < start) 0f else x(rs.idx - 1)
+                    val rTop = y(rs.zoneHigh)
+                    val rH = max(y(rs.zoneLow) - rTop, 2f)
+                    drawRect(rcol.copy(alpha = 0.18f), topLeft = Offset(xr0, rTop), size = Size(cw * 3f, rH))
+                    drawRect(rcol, topLeft = Offset(xr0, rTop), size = Size(cw * 3f, rH), style = Stroke(width = 2.5f))
+                    setupLines(if (rs.idx < start) 0f else x(rs.idx), rs.entry, rs.sl, rs.tp1, rs.tp2)
+                    setupTag(
+                        (if (rs.kind == 'Z') "ZZL" else if (rs.kind == 'N') "Re-entry MA" else "Re-entry Mid") +
+                            (if (rs.buy) " achat" else " vente"),
+                        rcol,
+                        xr0 + 4f,
+                        if (rs.buy) y(rs.zoneLow) + 3f else rTop - 16f
+                    )
+                }
+
                 // Blindspot 1/2, CK1, CK2 : zone d'entrée, lignes de tendance, entrée, stop et cibles
                 for (pt in patShown) {
                     if (pt.keyIdx >= end) continue
@@ -1725,6 +1877,8 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                     'E' -> showE
                     'M' -> showM
                     'R' -> showR
+                    'N' -> showRma
+                    'Z' -> showZzl
                     '1', '2' -> showCs
                     '3' -> showCsa
                     'S' -> showLiq
@@ -2037,110 +2191,4 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                     Text(
                         "Pas assez de bougies pour le profil.",
                         fontSize = 13.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                } else {
-                    Text(
-                        "Profil sur les " + vpRange + " dernières bougies · POC " +
-                            fmtPrice(vp.lo + (vp.poc + 0.5) * vp.step, dec) +
-                            " · zone de valeur " + fmtPrice(vp.lo + vp.vaLow * vp.step, dec) +
-                            " à " + fmtPrice(vp.lo + (vp.vaHigh + 1) * vp.step, dec),
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = pocColor
-                    )
-                }
-            }
-
-            val bbmaLine = d.bbmaLine
-            if (bbmaLine != null) {
-                Text(bbmaLine, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary)
-            }
-
-            var legend = ""
-            if (showEntries) legend += "Entrées : zones colorées, ligne bleue = entrée limite, rouge = SL, verte = TP1 · "
-            if (showBb) legend += "Bollinger (bleu) · "
-            if (showMa) legend += "MA5 (orange) et MA10 (jaune) · "
-            if (showEma) legend += "EMA50 (violet) · "
-            if (showZones) legend += "Zones : fond vert = discount, fond rouge = premium, bloc coloré = zone SMC · "
-            if (showSd) legend += "Supply/Demand : bordure verte = demande, rouge = offre, orange pointillé = zone déjà testée · "
-            if (showSr) legend += "S/R : lignes épaisses (plus épaisse = niveau plus souvent respecté), vert clair = support, orange = résistance · "
-            if (showFig) {
-                legend += "Figures : lignes de tendance tracées sur les derniers sommets et creux (vert = haussier, rouge = baissier, gris = neutre), " +
-                    "prolongées jusqu'à la dernière bougie pour voir la cassure · "
-            }
-            if (showFib) {
-                legend += "Fibonacci : retracement du plus grand mouvement visible (0 % = extrême le plus récent, 100 % = départ du mouvement), " +
-                    "zone rose = 50 à 61,8 %. Il change si tu zoomes ou fais défiler · "
-            }
-            if (showVp) {
-                legend += "Profil (plage fixe) : barres = temps passé à chaque prix, jaune = POC, bleu = zone de valeur 70 %. " +
-                    "Deriv ne fournit pas le volume réel · "
-            }
-            if (showE || showM || showR) {
-                legend += "Lettres : "
-                if (showE) legend += "E = Extrême  "
-                if (showM) legend += "M = MHV  "
-                if (showR) legend += "R = Re-entry  "
-                legend += "(vert sous la bougie = haussier, rouge au-dessus = baissier) · "
-            }
-            if (showCs) legend += "Points : CSM (magenta, gros), CSAK (orange) · "
-            if (showCsa) legend += "CSA (gris, petit) · "
-            if (showLiq) legend += "Liquidité : EQH/EQL = hauts/bas égaux, Liq. haute/basse = niveaux non touchés, S = sweep · "
-            if (showSw) {
-                legend += "Structure : HH = sommet plus haut, HL = creux plus haut (haussier), LH = sommet plus bas, LL = creux plus bas (baissier), H/L = premier point · "
-            }
-            if (showEng || showPin || showDoji || showInside || showStar || showDouble) {
-                legend += "Patterns : "
-                if (showEng) legend += "EN = Engulfing  "
-                if (showPin) legend += "PB = Pin bar (marteau / étoile filante)  "
-                if (showDoji) legend += "DJ = Doji  "
-                if (showInside) legend += "IB = Inside bar  "
-                if (showStar) legend += "ST = Étoile du matin/soir  "
-                if (showDouble) legend += "DC = Double creux, DS = Double sommet  "
-                legend += "(vert sous la bougie = haussier, rouge au-dessus = baissier, gris = neutre) · "
-            }
-            if (anySetup) {
-                legend += "Setups : zone colorée = entrée, trait épais = structure (épaule, base, tête, cassure), " +
-                    "bleu = entrée, rouge = SL, vert = TP1, turquoise = TP2. Setups actifs seulement · "
-            }
-            if (showHy1 || showHy2) {
-                legend += "Hybrid : ligne jaune = ligne de tendance, ligne grise = tendance précédente (Hybrid 2), " +
-                    "rose = Danger Zone (le prix ne doit pas l'avoir touchée) · "
-            }
-            if (showRbr || showDbd || showRbd || showDbr) {
-                legend += "RBR / DBD / RBD / DBR : rectangle = zone de la base (zone d'entrée), contour épais = bougies de la base. " +
-                    "Seulement les zones fraîches, jamais retestées · "
-            }
-            if (showBs1 || showBs2 || showCk1 || showCk2) {
-                legend += "Blindspot / CK : rectangle = zone d'entrée, ligne jaune = ligne de tendance (points 1-2, le point 3 est l'entrée) · "
-            }
-            if (legend.isNotEmpty()) {
-                Text(legend.removeSuffix(" · "), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-
-            val steps = listOf(30, 50, 80, 120, 200)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = {
-                    val i = steps.indexOfLast { it < visible }
-                    if (i >= 0) visible = steps[i]
-                }) { Text("Zoom +") }
-                OutlinedButton(onClick = {
-                    val nx = steps.firstOrNull { it > visible }
-                    if (nx != null) visible = nx
-                }) { Text("Zoom −") }
-            }
-            Text(
-                "Fais glisser le graphique vers la droite pour remonter dans le temps. " +
-                    "Le point blanc marque le prix actuel" +
-                    (if (buy != null && spec.time != 0L) ", la flèche la bougie du signal." else ".") +
-                    " Les marques et les patterns ne concernent que les bougies terminées. " +
-                    "Les patterns sont informatifs : ils ne changent pas le score des signaux. " +
-                    "Si c'est trop chargé, fais Zoom + ou active un bouton à la fois.",
-                fontSize = 11.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(bottom = 12.dp)
-            )
-        }
-    }
-}
+        
