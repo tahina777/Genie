@@ -7,8 +7,51 @@ data class BbmaHit(
     val setup: String,
     val dir: Direction,
     val extremeIdx: Int,
-    val reasons: List<String>
+    val reasons: List<String>,
+    val sub: String = ""        // pour Reentry : "Re-entry MA", "Re-entry Mid" ou "ZZL"
 )
+
+/**
+ * Type de Re-entry sur la bougie i (après un Extrême e), pour une vente (sell) ou un achat.
+ * 0 = aucun, 1 = Re-entry MA5/10 (la mèche coupe une MA5/10 high ou low),
+ * 2 = Re-entry Mid BB (la mèche coupe la bande médiane), 3 = ZZL (les deux sur la même bougie).
+ * Dans tous les cas la bougie clôture du bon côté (rejet) et le prix a déjà passé la bande médiane après l'Extrême.
+ */
+fun bbmaReentryKind(
+    c: List<Candle>, mid: DoubleArray,
+    m5h: DoubleArray, m10h: DoubleArray, m5l: DoubleArray, m10l: DoubleArray,
+    i: Int, e: Int, sell: Boolean
+): Int {
+    if (e < 0 || e >= i || mid[i].isNaN()) return 0
+    var went = false
+    for (k in e + 1 until i) {
+        if (sell && c[k].close < mid[k]) went = true
+        if (!sell && c[k].close > mid[k]) went = true
+    }
+    if (!went) return 0
+    val cur = c[i]
+    val lines = doubleArrayOf(m5h[i], m10h[i], m5l[i], m10l[i])
+    var maCut = false
+    for (l in lines) {
+        if (l.isNaN()) continue
+        if (sell && cur.high >= l && cur.close < l) maCut = true
+        if (!sell && cur.low <= l && cur.close > l) maCut = true
+    }
+    val midCut = if (sell) cur.high >= mid[i] && cur.close < mid[i]
+    else cur.low <= mid[i] && cur.close > mid[i]
+    return when {
+        maCut && midCut -> 3
+        midCut -> 2
+        maCut -> 1
+        else -> 0
+    }
+}
+
+private fun reentrySub(k: Int): String = when (k) {
+    3 -> "ZZL"
+    2 -> "Re-entry Mid"
+    else -> "Re-entry MA"
+}
 
 /** Repères BBMA du moment : Extrême le plus récent et type de la dernière bougie. */
 data class BbmaMarks(
@@ -118,13 +161,15 @@ class BbmaCalc(private val c: List<Candle>) {
                     listOf("Extreme vente puis MHV : le prix retouche la bande haute sans la dépasser avec la MA5")
                 )
             }
-            // Reentry : retour sur la bande médiane puis rejet
-            var wentBelow = false
-            for (k in e + 1 until i) if (c[k].close < mid[k]) wentBelow = true
-            if (wentBelow && cur.high >= mid[i] && cur.close < mid[i]) {
+            // Reentry : MA5/10, bande médiane ou les deux (ZZL), avec rejet
+            val rk = bbmaReentryKind(c, mid, ma5h, ma10h, ma5l, ma10l, i, e, true)
+            if (rk > 0) {
                 return BbmaHit(
                     "BBMA Reentry", Direction.SELL, e,
-                    listOf("Extreme vente puis Reentry : rejet sur la bande médiane")
+                    listOf("Extreme vente puis " + reentrySub(rk) + " : la mèche coupe " +
+                        (if (rk == 1) "la MA5/10" else if (rk == 2) "la bande médiane" else "la MA5/10 et la bande médiane") +
+                        " puis la bougie clôture en dessous (rejet)"),
+                    reentrySub(rk)
                 )
             }
         } else {
@@ -134,12 +179,14 @@ class BbmaCalc(private val c: List<Candle>) {
                     listOf("Extreme achat puis MHV : le prix retouche la bande basse sans la dépasser avec la MA5")
                 )
             }
-            var wentAbove = false
-            for (k in e + 1 until i) if (c[k].close > mid[k]) wentAbove = true
-            if (wentAbove && cur.low <= mid[i] && cur.close > mid[i]) {
+            val rk = bbmaReentryKind(c, mid, ma5h, ma10h, ma5l, ma10l, i, e, false)
+            if (rk > 0) {
                 return BbmaHit(
                     "BBMA Reentry", Direction.BUY, e,
-                    listOf("Extreme achat puis Reentry : rejet sur la bande médiane")
+                    listOf("Extreme achat puis " + reentrySub(rk) + " : la mèche coupe " +
+                        (if (rk == 1) "la MA5/10" else if (rk == 2) "la bande médiane" else "la MA5/10 et la bande médiane") +
+                        " puis la bougie clôture au-dessus (rejet)"),
+                    reentrySub(rk)
                 )
             }
         }
