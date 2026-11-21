@@ -16,7 +16,14 @@ import kotlin.math.min
  * Chaque QmSetup donne de quoi dessiner : indices des points (shoulder, base, head, break),
  * zone (zoneLow..zoneHigh), entrée, stop, TP1, TP2 et statut.
  *
- * ⚠️ Les règles sont DÉDUITES des schémas de la fiche, pas d'un cours.
+ * D'après les pages « QMR / QMC / QM2P / QMM + Confirmation » de la fiche Bystra (vente ; achat = miroir) :
+ *   Structure commune : H (épaule) -> L -> HH (la tête prend la liquidité) -> LL (casse L). Zone d'entrée = niveau H.
+ *   QMR  : la structure complète, entrée au retest de la zone H.
+ *   QMC  : la tête (2) ne dépasse pas le plus haut précédent (1) ; une ligne de tendance passe par 1, la tête 2 et l'entrée 3.
+ *   QM2P : la tête est faite de 2 sommets proches (1 et 2) ; la ligne passant par eux coupe la zone à l'entrée 3.
+ *   QMM  : le niveau H est CASSÉ dans l'autre sens après LL (RBR / RBD) : entrée au retest du niveau, dans le sens de la cassure.
+ *
+ * ⚠️ La « Confirmation » de la fiche (bougie englobante sur le timeframe supérieur) n'est pas vérifiée : à contrôler à la main.
  *    Tous les réglages sont dans QmConfig pour pouvoir les ajuster.
  */
 
@@ -45,7 +52,7 @@ data class QmConfig(
     val trendMaPeriod: Int = 50,          // moyenne mobile pour le sens de la tendance (QMC)
     val baseRangeAtr: Double = 0.6,       // une bougie "de base" a une amplitude <= ça (en ATR)
     val baseMinCandles: Int = 2,          // nb mini de bougies de base autour de l'épaule (QMM)
-    val twoPTolAtr: Double = 0.5,         // écart max entre les 2 points de la tête (QM2P)
+    val twoPTolAtr: Double = 0.8,         // écart max entre les 2 points de la tête (QM2P)
     val includeResolved: Boolean = false  // inclure les setups déjà terminés ou invalidés
 )
 
@@ -145,45 +152,6 @@ object QmSetups {
             val rr = (entry - tp2) / risk
             if (rr < cfg.minRR) continue
 
-            // Contexte : prise de liquidité externe = retournement (QMR), sinon continuation (QMC)
-            val from = max(0, headIdx - cfg.trendLookback)
-            var lookbackHigh = Double.NEGATIVE_INFINITY
-            for (j in from until headIdx) lookbackHigh = max(lookbackHigh, c[j].high)
-            val external = headHigh >= lookbackHigh
-            val ma = sma[breakIdx]
-            val trendDown = !ma.isNaN() && c[breakIdx].close < ma
-
-            val types = mutableSetOf<QmType>()
-            var head2: Int? = null
-            if (external) {
-                types += QmType.QMR
-
-                // QMM : une base (petites bougies) autour de l'épaule
-                var small = 0
-                for (j in max(0, a.idx - 2)..min(c.lastIndex, a.idx + 2)) {
-                    if (c[j].high - c[j].low <= cfg.baseRangeAtr * atr[j]) small++
-                }
-                if (small >= cfg.baseMinCandles) types += QmType.QMM
-
-                // QM2P : la tête est faite de 2 sommets proches, tous deux au-dessus de l'épaule
-                val headPivots = pivots.filter {
-                    it.isHigh && it.idx > b.idx && it.idx < breakIdx && it.price > a.price
-                }
-                if (headPivots.size >= 2) {
-                    val sorted = headPivots.sortedByDescending { it.price }
-                    val p1 = sorted[0]
-                    val p2 = sorted[1]
-                    if (abs(p1.price - p2.price) <= cfg.twoPTolAtr * atr[p1.idx]) {
-                        types += QmType.QM2P
-                        head2 = if (p1.idx == headIdx) p2.idx else p1.idx
-                    }
-                }
-            } else if (trendDown) {
-                types += QmType.QMC
-            } else {
-                continue   // contexte ambigu : on ignore
-            }
-
             // Statut après la cassure
             var status = QmStatus.PENDING
             var trigger: Int? = null
@@ -200,6 +168,53 @@ object QmSetups {
                     if (cd.high >= sl) { status = QmStatus.INVALID; break@loop }
                     if (cd.low <= tp1) { status = QmStatus.COMPLETED; break@loop }
                 }
+            }
+
+            // Contexte : prise de liquidité externe = retournement (QMR), sinon continuation (QMC)
+            val from = max(0, headIdx - cfg.trendLookback)
+            var lookbackHigh = Double.NEGATIVE_INFINITY
+            for (j in from until headIdx) lookbackHigh = max(lookbackHigh, c[j].high)
+            val external = headHigh >= lookbackHigh
+            val ma = sma[breakIdx]
+            val trendDown = !ma.isNaN() && c[breakIdx].close < ma
+
+            val types = mutableSetOf<QmType>()
+            var head2: Int? = null
+            if (external) {
+                types += QmType.QMR
+
+                // QM2P : la tête est faite de 2 sommets proches, tous deux au-dessus de l'épaule,
+                // et la ligne qui passe par eux coupe la zone d'entrée
+                val headPivots = pivots.filter {
+                    it.isHigh && it.idx > b.idx && it.idx < breakIdx && it.price > a.price
+                }
+                if (headPivots.size >= 2) {
+                    val sorted = headPivots.sortedByDescending { it.price }
+                    val p1 = sorted[0]
+                    val p2 = sorted[1]
+                    if (abs(p1.price - p2.price) <= cfg.twoPTolAtr * atr[p1.idx]) {
+                        val first = if (p1.idx < p2.idx) p1 else p2
+                        val second = if (p1.idx < p2.idx) p2 else p1
+                        if (lineHitsEntry(first.idx, first.price, second.idx, second.price, entry, atr[breakIdx], trigger, c.lastIndex)) {
+                            types += QmType.QM2P
+                            head2 = if (p1.idx == headIdx) p2.idx else p1.idx
+                        }
+                    }
+                }
+            } else if (trendDown) {
+                // QMC : ligne de tendance du plus haut précédent (1) à la tête (2), qui coupe la zone à l'entrée (3)
+                var top = -1
+                var topHigh = Double.NEGATIVE_INFINITY
+                for (j in from until headIdx) if (c[j].high > topHigh) { topHigh = c[j].high; top = j }
+                if (top >= 0 && headIdx - top >= 4 &&
+                    lineHitsEntry(top, topHigh, headIdx, headHigh, entry, atr[breakIdx], trigger, c.lastIndex)
+                ) {
+                    types += QmType.QMC
+                } else {
+                    continue
+                }
+            } else {
+                continue   // contexte ambigu : on ignore
             }
 
             out += QmSetup(
@@ -220,12 +235,81 @@ object QmSetups {
                 status = status,
                 triggerIdx = trigger
             )
+
+            // QMM : après LL, le niveau de l'épaule est cassé dans l'autre sens (RBR / RBD) ;
+            // entrée au retest de la zone, dans le sens de la cassure (achat dans ce repère, inversé ensuite)
+            if (external) {
+                var u = -1
+                val lastU = min(c.lastIndex, breakIdx + 60)
+                for (i in breakIdx + 1..lastU) {
+                    if (c[i].close > zoneHigh + 0.1 * atr[i] && c[i].close - c[i].open >= 0.8 * atr[i]) { u = i; break }
+                }
+                if (u >= 0) {
+                    val entryM = zoneHigh
+                    val slM = zoneLow - cfg.slBufferAtr * atr[u]
+                    val riskM = entryM - slM
+                    if (riskM > 0.0) {
+                        val tp1M = entryM + 1.5 * riskM
+                        val tp2M = entryM + 3.0 * riskM
+                        var statusM = QmStatus.PENDING
+                        var trigM: Int? = null
+                        loopM@ for (i in u + 1..c.lastIndex) {
+                            val cd = c[i]
+                            if (trigM == null) {
+                                if (cd.close < zoneLow - 0.25 * atr[i]) { statusM = QmStatus.INVALID; break@loopM }
+                                if (cd.low <= entryM) {
+                                    trigM = i
+                                    statusM = QmStatus.TRIGGERED
+                                    if (cd.low <= slM) { statusM = QmStatus.INVALID; break@loopM }
+                                }
+                            } else {
+                                if (cd.low <= slM) { statusM = QmStatus.INVALID; break@loopM }
+                                if (cd.high >= tp1M) { statusM = QmStatus.COMPLETED; break@loopM }
+                            }
+                        }
+                        out += QmSetup(
+                            types = setOf(QmType.QMM),
+                            direction = QmDirection.BUY,
+                            shoulderIdx = a.idx,
+                            baseIdx = b.idx,
+                            headIdx = headIdx,
+                            head2Idx = null,
+                            breakIdx = u,
+                            zoneHigh = zoneHigh,
+                            zoneLow = zoneLow,
+                            entry = entryM,
+                            stopLoss = slM,
+                            tp1 = tp1M,
+                            tp2 = tp2M,
+                            rr = 3.0,
+                            status = statusM,
+                            triggerIdx = trigM
+                        )
+                    }
+                }
+            }
         }
         return out
     }
 
+    /**
+     * La droite passant par (i1, p1) et (i2, p2) est descendante et passe près de l'entrée au moment du retest
+     * (ou, si l'entrée n'est pas encore touchée, elle l'atteindra bientôt).
+     */
+    private fun lineHitsEntry(
+        i1: Int, p1: Double, i2: Int, p2: Double,
+        entry: Double, atrNow: Double, trigger: Int?, lastIdx: Int
+    ): Boolean {
+        if (i2 <= i1) return false
+        val slope = (p2 - p1) / (i2 - i1)
+        if (slope >= 0.0) return false
+        val ref = trigger ?: lastIdx
+        val diff = (p2 + slope * (ref - i2)) - entry
+        return if (trigger != null) abs(diff) <= 1.0 * atrNow else diff >= -1.0 * atrNow && diff <= 3.0 * atrNow
+    }
+
     private fun unmirror(s: QmSetup) = s.copy(
-        direction = QmDirection.BUY,
+        direction = if (s.direction == QmDirection.SELL) QmDirection.BUY else QmDirection.SELL,
         zoneHigh = -s.zoneLow,
         zoneLow = -s.zoneHigh,
         entry = -s.entry,
