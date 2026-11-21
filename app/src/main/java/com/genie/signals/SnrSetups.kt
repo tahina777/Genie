@@ -13,17 +13,20 @@ import kotlin.math.min
  *   val bougies = tesBougies.map { QmCandle(it.time, it.open, it.high, it.low, it.close) }
  *   val signaux = SnrSetups.detect(bougies, SnrType.SNRC1)   // SNRC2, SNRC3 pour les autres boutons
  *
- * Principe (déduit des schémas, pas d'un cours) :
- *   1. Un niveau SNR "malaisien" = la plus haute clôture autour d'un sommet (les mèches sont ignorées).
- *   2. Une bougie impulsive clôture au-dessus du niveau, dans le sens de la tendance.
- *   3. Le prix s'éloigne puis revient tester le niveau : c'est l'entrée (achat ; vente = miroir).
+ * Principe (d'après les pages « SNRC1/2/3 + Confirmation » de la fiche Bystra) :
+ *   1. Un niveau « Strong Resistance » (achat) ou « Strong Support » (vente) = la plus haute clôture autour d'un sommet.
+ *   2. Une bougie impulsive clôture au-dessus du niveau (cassure), dans le sens de la tendance.
+ *   3. Le prix revient tester le niveau : c'est l'entrée (zone cyan de la fiche). Vente = miroir.
  *
- * Les 3 variantes (un setup n'a qu'un seul type, le plus précis gagne) :
- *   SNRC3 : une bougie de rejet (pin bar ou englobante) confirme le test du niveau.
- *   SNRC2 : une base (petites bougies, RBR/DBD) précède la cassure.
- *   SNRC1 : cassure puis test simple, sans base ni bougie de confirmation.
+ * Les 3 variantes (un setup n'a qu'un seul type) :
+ *   SNRC1 : RBR (achat) / DBD (vente) : une base (petites bougies) au niveau, puis cassure.
+ *   SNRC2 : DBR (achat) / RBD (vente) : le prix s'éloigne du niveau, fait une base plus bas (plus haut en vente), puis remonte
+ *           casser le niveau.
+ *   SNRC3 : Failed Bearish Engulfing sur le niveau (achat) puis Bullish Engulfing qui le renie, puis cassure et retest.
+ *           En vente : Failed Bullish Engulfing puis Bearish Engulfing.
  *
- * Un setup encore en attente de test ne peut pas être SNRC3, car la bougie de confirmation n'existe pas encore.
+ * ⚠️ La « Confirmation » de la fiche (bougie englobante sur le timeframe supérieur, HTF) n'est pas vérifiée :
+ *    Genie analyse un timeframe à la fois, elle se contrôle à la main.
  */
 
 enum class SnrType { SNRC1, SNRC2, SNRC3 }
@@ -44,7 +47,7 @@ data class SnrConfig(
     val slAtr: Double = 1.0,              // stop sous le niveau
     val minRR: Double = 1.5,              // ratio mini entrée -> TP1 / risque
     val tp2R: Double = 3.0,               // TP2 en multiples du risque
-    val baseWindow: Int = 6,              // bougies regardées avant la cassure pour trouver la base
+    val baseWindow: Int = 8,              // bougies regardées avant la cassure pour trouver la base
     val baseRangeAtr: Double = 0.6,       // une bougie "de base" a une amplitude <= ça (en ATR)
     val baseMinCandles: Int = 2,
     val zoneAtr: Double = 0.15,           // demi-épaisseur de la zone autour du niveau
@@ -135,6 +138,13 @@ object SnrSetups {
             }
             val hasBase = small >= cfg.baseMinCandles
 
+            // Base DBR : petites bougies nettement sous le niveau, avant la cassure
+            var low = 0
+            for (j in max(0, breakIdx - cfg.baseWindow - 4) until breakIdx) {
+                if (c[j].high < level - 0.5 * atr[j] && c[j].high - c[j].low <= cfg.baseRangeAtr * atr[j]) low++
+            }
+            val hasDbr = low >= cfg.baseMinCandles
+
             // 3. Éloignement puis test du niveau
             var maxHigh = bk.high
             var retestIdx = -1
@@ -162,24 +172,24 @@ object SnrSetups {
             val tp2 = max(tp1, entry + cfg.tp2R * risk)
             val zone = cfg.zoneAtr * atr[breakIdx]
 
-            // Bougie de rejet sur le test (ou la suivante)
+            // SNRC3 : Failed Bearish Engulfing sur le niveau, puis Bullish Engulfing qui clôture au-dessus de son sommet
             var confirmIdx: Int? = null
-            if (retestIdx >= 0) {
-                if (bullConfirm(c, retestIdx, level)) {
-                    confirmIdx = retestIdx
-                } else {
-                    val nx = retestIdx + 1
-                    if (nx <= c.lastIndex &&
-                        c[nx].low >= level - cfg.failCloseAtr * atr[nx] &&
-                        bullConfirm(c, nx, level)
-                    ) confirmIdx = nx
+            for (f in max(1, p - 3)..min(breakIdx - 1, p + n + 3)) {
+                val cf = c[f]
+                val pv = c[f - 1]
+                val bearEng = cf.close < cf.open && pv.close > pv.open && cf.open >= pv.close && cf.close <= pv.open
+                if (!bearEng || abs(cf.open - level) > 0.6 * atr[f]) continue
+                for (e in f + 1..breakIdx) {
+                    if (c[e].close > c[e].open && c[e].close > cf.high) { confirmIdx = e; break }
                 }
+                if (confirmIdx != null) break
             }
 
             val type = when {
                 confirmIdx != null -> SnrType.SNRC3
-                hasBase -> SnrType.SNRC2
-                else -> SnrType.SNRC1
+                hasBase -> SnrType.SNRC1
+                hasDbr -> SnrType.SNRC2
+                else -> continue
             }
 
             // Statut
