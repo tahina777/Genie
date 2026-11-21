@@ -158,6 +158,8 @@ object QmSetups {
             loop@ for (i in breakIdx + 1..c.lastIndex) {
                 val cd = c[i]
                 if (trigger == null) {
+                    // le prix a déjà dépassé la cible sans revenir sur l'entrée : setup périmé
+                    if (cd.low <= tp2 - 0.5 * risk) { status = QmStatus.COMPLETED; break@loop }
                     if (cd.close > headHigh) { status = QmStatus.INVALID; break@loop }
                     if (cd.high >= entry) {
                         trigger = i
@@ -256,6 +258,7 @@ object QmSetups {
                         loopM@ for (i in u + 1..c.lastIndex) {
                             val cd = c[i]
                             if (trigM == null) {
+                                if (cd.high >= tp1M) { statusM = QmStatus.COMPLETED; break@loopM } // déjà parti sans retest
                                 if (cd.close < zoneLow - 0.25 * atr[i]) { statusM = QmStatus.INVALID; break@loopM }
                                 if (cd.low <= entryM) {
                                     trigM = i
