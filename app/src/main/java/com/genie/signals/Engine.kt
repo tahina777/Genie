@@ -182,7 +182,7 @@ object Engine {
             val side = if (ext == Direction.SELL) "Extrême haut" else "Extrême bas"
             parts.add(if (mk.extremeAgo == 0) side else side + " (il y a " + mk.extremeAgo + " bougies)")
         }
-        if (bh != null) parts.add(if (bh.setup.contains("MHV")) "MHV" else "Re-entry")
+        if (bh != null) parts.add(if (bh.setup.contains("MHV")) "MHV" else bh.sub.ifEmpty { "Re-entry" })
         val cn = mk.candle
         val cd = mk.candleDir
         if (cn != null && cd != null) {
