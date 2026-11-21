@@ -140,7 +140,7 @@ object PatSetups {
 
             val tp1 = entry + 1.5 * risk
             val tp2 = entry + 3.0 * risk
-            val status = statusOf(c, r, sl, tp1) ?: continue
+            val status = statusOf(c, r, sl, tp1, s + 1) ?: continue
 
             // Blindspot 2 : ligne de tendance montante par 2 creux avant la cassure, point 3 sur l'entrée
             var type = PatType.BS1
@@ -222,7 +222,7 @@ object PatSetups {
 
                 val tp1 = entry + 1.5 * risk
                 val tp2 = entry + 3.0 * risk
-                val status = statusOf(c, r, sl, tp1) ?: continue
+                val status = statusOf(c, r, sl, tp1, u + 1) ?: continue
                 out.add(
                     PatSetup(
                         PatType.CK1, QmDirection.BUY, l, u, z, entry, entry, sl, tp1, tp2, 3.0,
@@ -291,7 +291,7 @@ object PatSetups {
             if (c[i].low <= entry + 0.1 * a) { r = i; break }
         }
         if (r >= 0 && r < n - 40) return emptyList()
-        val status = statusOf(c, r, sl, tp1) ?: return emptyList()
+        val status = statusOf(c, r, sl, tp1, last + 1) ?: return emptyList()
 
         return listOf(
             PatSetup(
@@ -304,9 +304,17 @@ object PatSetups {
 
     // ---------------------------------------------------------------- outils
 
-    /** En attente (r < 0), entrée touchée, ou null si le setup est terminé (stop ou TP1 atteint). */
-    private fun statusOf(c: List<QmCandle>, r: Int, sl: Double, tp1: Double): QmStatus? {
-        if (r < 0) return QmStatus.PENDING
+    /**
+     * En attente (r < 0), entrée touchée, ou null si le setup est terminé ou périmé : stop ou TP1 déjà atteint,
+     * y compris sans retest (le prix est parti sans revenir sur l'entrée).
+     */
+    private fun statusOf(c: List<QmCandle>, r: Int, sl: Double, tp1: Double, from: Int): QmStatus? {
+        if (r < 0) {
+            for (k in max(0, from) until c.size) {
+                if (c[k].low <= sl || c[k].high >= tp1) return null
+            }
+            return QmStatus.PENDING
+        }
         for (k in r until c.size) {
             if (c[k].low <= sl) return null
             if (c[k].high >= tp1) return null
