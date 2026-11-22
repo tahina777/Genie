@@ -227,6 +227,7 @@ fun GenieApp(vm: MainVm) {
     val jLoading by vm.jLoading.collectAsState()
     var alerts by remember { mutableStateOf(Alerts.isOn(ctx)) }
     var zonesOn by remember { mutableStateOf(ZoneAlerts.isOn(ctx)) }
+    var followStructure by remember { mutableStateOf(StructureFilter.isOn(ctx)) }
     var screen by remember { mutableStateOf(0) }
     var chart by remember { mutableStateOf<ChartSpec?>(null) }
     var showFar by remember { mutableStateOf(false) }
@@ -465,6 +466,21 @@ fun GenieApp(vm: MainVm) {
                                     ZoneAlerts.enable(ctx)
                                     zonesOn = true
                                 }
+                            }
+                        )
+                    }
+
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            "Suivre la structure D1 + H4 (alertes dans son sens seulement)",
+                            fontSize = 12.sp,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Switch(
+                            checked = followStructure,
+                            onCheckedChange = { on ->
+                                StructureFilter.setOn(ctx, on)
+                                followStructure = on
                             }
                         )
                     }
