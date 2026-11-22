@@ -11,7 +11,8 @@ class SmcConcept(
     val fromIdx: Int,
     val low: Double,
     val high: Double,
-    val label: String
+    val label: String,
+    val atIdx: Int = -1      // bougie où le concept est confirmé (sert aux alertes)
 )
 
 /**
@@ -70,7 +71,7 @@ object SmcConcepts {
         gaps.filter { !filled(c, it) }
             .sortedBy { dist(it.low, it.high, price) }
             .take(4)
-            .map { SmcConcept("FVG", it.buy, it.idx - 1, it.low, it.high, if (it.buy) "FVG achat" else "FVG vente") }
+            .map { SmcConcept("FVG", it.buy, it.idx - 1, it.low, it.high, if (it.buy) "FVG achat" else "FVG vente", it.idx + 1) }
 
     private fun bpr(c: List<Candle>, gaps: List<Gap>, price: Double): List<SmcConcept> {
         val found = ArrayList<SmcConcept>()
@@ -89,7 +90,7 @@ object SmcConcepts {
                 if (crossed) continue
                 val buyDir = if (a.idx > b.idx) a.buy else b.buy
                 found.add(
-                    SmcConcept("BPR", buyDir, min(a.idx, b.idx) - 1, lo, hi, if (buyDir) "BPR achat" else "BPR vente")
+                    SmcConcept("BPR", buyDir, min(a.idx, b.idx) - 1, lo, hi, if (buyDir) "BPR achat" else "BPR vente", later + 1)
                 )
             }
         }
@@ -99,7 +100,7 @@ object SmcConcepts {
     private fun poi(c: List<Candle>, gaps: List<Gap>, atr: Double, price: Double): List<SmcConcept> {
         val n = c.size
         val found = ArrayList<SmcConcept>()
-        for (i in max(2, n - LOOKBACK)..n - 5) {
+        for (i in max(2, n - LOOKBACK)..n - 4) {
             val b = c[i]
             var hiMax = Double.NEGATIVE_INFINITY
             var loMin = Double.POSITIVE_INFINITY
@@ -113,14 +114,14 @@ object SmcConcepts {
             ) {
                 var mitig = false
                 for (k in i + 4 until n) if (c[k].low <= b.high) mitig = true
-                if (!mitig) found.add(SmcConcept("POI", true, i, b.low, b.high, "POI achat"))
+                if (!mitig) found.add(SmcConcept("POI", true, i, b.low, b.high, "POI achat", i + 3))
             }
             if (b.close > b.open && b.high - loMin >= 1.5 * atr && c[i + 1].close < b.low &&
                 gapNear.any { !it.buy }
             ) {
                 var mitig = false
                 for (k in i + 4 until n) if (c[k].high >= b.low) mitig = true
-                if (!mitig) found.add(SmcConcept("POI", false, i, b.low, b.high, "POI vente"))
+                if (!mitig) found.add(SmcConcept("POI", false, i, b.low, b.high, "POI vente", i + 3))
             }
         }
         return found.sortedBy { dist(it.low, it.high, price) }.take(3)
@@ -141,7 +142,7 @@ object SmcConcepts {
                     if (abs(c[i].low - price) <= 3 * atr)
                         found.add(SmcConcept("IDM", true, i, c[i].low, c[i].low, "IDM bas"))
                 } else if (sweep >= n - 25 && c[sweep].close > c[i].low) {
-                    found.add(SmcConcept("IDM", true, i, c[i].low, c[i].low, "IDM bas pris"))
+                    found.add(SmcConcept("IDM", true, i, c[i].low, c[i].low, "IDM bas pris", sweep))
                 }
             }
             if (isHigh) {
@@ -151,7 +152,7 @@ object SmcConcepts {
                     if (abs(c[i].high - price) <= 3 * atr)
                         found.add(SmcConcept("IDM", false, i, c[i].high, c[i].high, "IDM haut"))
                 } else if (sweep >= n - 25 && c[sweep].close < c[i].high) {
-                    found.add(SmcConcept("IDM", false, i, c[i].high, c[i].high, "IDM haut pris"))
+                    found.add(SmcConcept("IDM", false, i, c[i].high, c[i].high, "IDM haut pris", sweep))
                 }
             }
         }
@@ -168,12 +169,12 @@ object SmcConcepts {
             if (s.high > r.high && s.close < r.high && s.close > r.low) {
                 var done = false
                 for (k in i + 1 until n) if (c[k].low <= r.low || c[k].high > s.high) done = true
-                if (!done) found.add(SmcConcept("CRT", false, i - 1, r.low, r.high, "CRT vente"))
+                if (!done) found.add(SmcConcept("CRT", false, i - 1, r.low, r.high, "CRT vente", i))
             }
             if (s.low < r.low && s.close > r.low && s.close < r.high) {
                 var done = false
                 for (k in i + 1 until n) if (c[k].high >= r.high || c[k].low < s.low) done = true
-                if (!done) found.add(SmcConcept("CRT", true, i - 1, r.low, r.high, "CRT achat"))
+                if (!done) found.add(SmcConcept("CRT", true, i - 1, r.low, r.high, "CRT achat", i))
             }
         }
         return found.takeLast(2)
