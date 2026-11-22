@@ -257,6 +257,14 @@ class ZoneService : Service() {
                             } catch (e: Exception) {
                                 // une erreur d'alerte ne doit pas bloquer le calcul des zones
                             }
+                            // FVG, BPR, POI, Inducement, CRT : alerte quand un concept vient d'être confirmé
+                            try {
+                                SmcConceptAlerts.check(this@ZoneService, m, tf, raw)
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                // une erreur d'alerte ne doit pas bloquer le calcul des zones
+                            }
                             Res(m, tf, true, ZoneBuilder.build(m, tf, raw))
                         } catch (e: CancellationException) {
                             throw e
