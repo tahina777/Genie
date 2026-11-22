@@ -10,7 +10,8 @@ data class WatchZone(
     val kind: String,
     val dir: Direction,
     val low: Double,
-    val high: Double
+    val high: Double,
+    val note: String = ""
 ) {
     val key: String
         get() = market.code + "|" + tf.label + "|" + kind + "|" + dir + "|" + (low * 1_000_000.0).toLong()
@@ -96,43 +97,20 @@ object ZoneBuilder {
         return found.sortedBy { abs(price - (it.low + it.high) / 2) }.take(2)
     }
 
-    /** Re-entry BBMA : retour du prix sur la bande médiane après un Extrême dans le sens de la tendance. */
+    /** Re-entry BBMA en attente (MA5/10, bande médiane ou ZZL) après un Extrême, dans le sens de la tendance. */
     private fun reentry(
         m: Market, tf: Tf, c: List<Candle>, atr: Double, dir: Direction, price: Double
     ): List<WatchZone> {
-        val n = c.size
-        if (n < 60) return emptyList()
-        val closes = DoubleArray(n) { c[it].close }
-        val highs = DoubleArray(n) { c[it].high }
-        val lows = DoubleArray(n) { c[it].low }
-        val bb = Ind.bollinger(closes)
-        val ma5h = Ind.wma(highs, 5)
-        val ma5l = Ind.wma(lows, 5)
-        val i = n - 1
-
-        var e = -1
-        var ext: Direction? = null
-        for (k in i downTo max(i - 15, 0)) {
-            if (ma5h[k] > bb.up[k]) { e = k; ext = Direction.SELL; break }
-            if (ma5l[k] < bb.low[k]) { e = k; ext = Direction.BUY; break }
-        }
-        if (e == -1 || ext != dir) return emptyList()
-
-        val mid = bb.mid[i]
-        if (mid.isNaN()) return emptyList()
-
-        // Le prix a déjà repris la bande médiane après l'Extrême
-        var crossed = false
-        for (k in (e + 1)..i) {
-            if (dir == Direction.BUY && c[k].close > bb.mid[k]) crossed = true
-            if (dir == Direction.SELL && c[k].close < bb.mid[k]) crossed = true
-        }
-        if (!crossed) return emptyList()
-
-        val pad = 0.15 * atr
-        val placed = if (dir == Direction.BUY) price > mid + pad else price < mid - pad
-        if (!placed) return emptyList()
-        return listOf(WatchZone(m, tf, "Re-entry BBMA", dir, mid - pad, mid + pad))
+        if (c.size < 60) return emptyList()
+        val b = BbmaCalc(c)
+        val p = b.pending() ?: return emptyList()
+        if (p.dir != dir) return emptyList()
+        val pad = 0.1 * atr
+        val mk = b.marks()
+        val csak = if (mk.candle == "CSAK" && mk.candleDir == dir) "CSAK trouvé" else "CSAK pas encore trouvé"
+        return listOf(
+            WatchZone(m, tf, bbmaPendingName(p.kind) + " BBMA", dir, p.low - pad, p.high + pad, csak)
+        )
     }
 
     /** Supports (tendance haussière) ou résistances (baissière) respectés au moins 2 fois. */
