@@ -339,6 +339,8 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
     // BBMA multi timeframe : D1, H4, H1, M15, M5 et combos (REE, RME, REM, RRE, RMM)
     var bbmaTfs by remember(spec) { mutableStateOf<List<String>>(emptyList()) }
     var bbmaCombos by remember(spec) { mutableStateOf<List<String>>(emptyList()) }
+    var smcTfs by remember(spec) { mutableStateOf<List<String>>(emptyList()) }
+    var smcCombos by remember(spec) { mutableStateOf<List<String>>(emptyList()) }
     LaunchedEffect(spec) {
         val closedMap = HashMap<Tf, List<Candle>>()
         val texts = ArrayList<String>()
@@ -371,6 +373,28 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
         }
         bbmaTfs = texts
         bbmaCombos = combos
+        try {
+            val st = ArrayList<String>()
+            for (t in listOf(Tf.H4, Tf.H1, Tf.M15, Tf.M5)) {
+                val cl = closedMap[t] ?: continue
+                st.add(SmcCombos.tfText(t, cl))
+            }
+            val sc = ArrayList<String>()
+            for (tr in SmcCombos.TRIPLES) {
+                if (tr.any { closedMap[it] == null }) continue
+                val mt = SmcCombos.match(tr.map { closedMap[it]!! }, tr) ?: continue
+                sc.add(
+                    "Combo SMC " + tr.joinToString(" \u00b7 ") { it.label } +
+                        (if (mt.dir == Direction.BUY) " achat" else " vente")
+                )
+            }
+            smcTfs = st
+            smcCombos = sc
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // SMC multi timeframe indisponible
+        }
     }
 
     LaunchedEffect(spec) {
@@ -462,6 +486,16 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             for (cm in bbmaCombos) {
+                Text(cm, fontSize = 12.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+            }
+        }
+        if (smcTfs.isNotEmpty()) {
+            Text(
+                "SMC \u00b7 " + smcTfs.joinToString(" \u00b7 "),
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            for (cm in smcCombos) {
                 Text(cm, fontSize = 12.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
             }
         }
