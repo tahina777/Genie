@@ -109,6 +109,8 @@ object SetupAlerts {
         var sent = 0
         for (s in items) {
             if (sent >= 3) break
+            val sd = if (s.dir == QmDirection.BUY) Direction.BUY else Direction.SELL
+            if (!StructureFilter.allows(ctx, m, sd)) continue
             val key = "sa_" + m.code + "|" + tf.label + "|" + s.kind + "|" + s.dir.name
             val value = s.breakTime.toString() + ":" + s.status.name
             if (prefs.getString(key, null) == value) continue
