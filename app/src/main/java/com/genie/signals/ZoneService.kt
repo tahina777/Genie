@@ -232,7 +232,8 @@ class ZoneService : Service() {
                             try {
                                 val mine = old.filter { it.market.code == m.code && it.tf == tf }
                                 val hit = ZoneConfirm.check(m, tf, raw, mine)
-                                if (hit != null && !ZoneConfirm.alreadySent(this@ZoneService, m, tf, hit.candle.time)) {
+                                if (hit != null && StructureFilter.allows(this@ZoneService, m, hit.zone.dir) &&
+                                    !ZoneConfirm.alreadySent(this@ZoneService, m, tf, hit.candle.time)) {
                                     ZoneConfirm.notify(this@ZoneService, m, tf, hit)
                                 }
                             } catch (e: CancellationException) {
@@ -275,6 +276,7 @@ class ZoneService : Service() {
             val c = structs[m.code + "|H1"]
             if (a == null || b == null || c == null) continue
             try {
+                StructureFilter.store(this@ZoneService, m, a, b)
                 StructureAlerts.check(this@ZoneService, m, a, b, c)
             } catch (e: Exception) {
                 // une erreur d'alerte ne doit pas bloquer le calcul des zones
@@ -380,7 +382,7 @@ class ZoneService : Service() {
             if (now - last < z.tf.seconds * 2000L) continue
             cooldown[key] = now
             prefs.edit().putLong("zc_$key", now).apply()
-            ZoneAlerts.notifyZone(this, z, price)
+            if (StructureFilter.allows(this, z.market, z.dir)) ZoneAlerts.notifyZone(this, z, price)
         }
     }
 }
