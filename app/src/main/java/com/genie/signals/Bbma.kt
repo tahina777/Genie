@@ -1,5 +1,6 @@
 package com.genie.signals
 
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 
@@ -45,6 +46,15 @@ fun bbmaReentryKind(
         maCut -> 1
         else -> 0
     }
+}
+
+/** Re-entry en attente : niveau (zone) vers lequel le prix revient, pas encore touché. kind : 1 = MA5/10, 2 = Mid BB, 3 = ZZL. */
+class BbmaPending(val dir: Direction, val kind: Int, val low: Double, val high: Double, val extremeIdx: Int)
+
+fun bbmaPendingName(kind: Int): String = when (kind) {
+    3 -> "ZZL"
+    2 -> "Re-entry Mid"
+    else -> "Re-entry MA"
 }
 
 private fun reentrySub(k: Int): String = when (k) {
@@ -130,6 +140,51 @@ class BbmaCalc(private val c: List<Candle>) {
             name = if (cl < mid[i]) "CSAK" else "CSA"
         }
         return BbmaMarks(ext, ago, name, dir)
+    }
+
+    /**
+     * Re-entry en attente sur la dernière bougie terminée : après un Extrême, le prix a déjà repassé la bande médiane
+     * et revient vers la MA5/10, la bande médiane ou les deux (ZZL), sans les avoir touchées (pas de Re-entry
+     * sur les 3 dernières bougies). Le niveau doit être à moins de 0,8 ATR du prix.
+     */
+    fun pending(): BbmaPending? {
+        val i = c.lastIndex
+        if (i < 56) return null
+        var e = -1
+        var dir: Direction? = null
+        for (k in i downTo max(i - 15, 0)) {
+            if (ma5h[k] > up[k]) { e = k; dir = Direction.SELL; break }
+            if (ma5l[k] < low[k]) { e = k; dir = Direction.BUY; break }
+        }
+        if (e == -1 || dir == null || e == i) return null
+        val sell = dir == Direction.SELL
+        var went = false
+        for (k in e + 1..i) {
+            if (sell && c[k].close < mid[k]) went = true
+            if (!sell && c[k].close > mid[k]) went = true
+        }
+        if (!went) return null
+        // Déjà touché récemment : ce n'est plus en attente
+        for (k in max(e + 1, i - 3)..i) {
+            if (bbmaReentryKind(c, mid, ma5h, ma10h, ma5l, ma10l, k, e, sell) > 0) return null
+        }
+        val cur = c[i]
+        val atr = Ind.atr(c)
+        if (atr <= 0.0) return null
+        val levels = ArrayList<Pair<Double, Boolean>>()
+        if (!mid[i].isNaN()) levels.add(Pair(mid[i], true))
+        for (v in doubleArrayOf(ma5h[i], ma10h[i], ma5l[i], ma10l[i])) {
+            if (!v.isNaN()) levels.add(Pair(v, false))
+        }
+        val cand = levels.filter { if (sell) it.first > cur.high else it.first < cur.low }
+        if (cand.isEmpty()) return null
+        val near = if (sell) cand.minByOrNull { it.first }!! else cand.maxByOrNull { it.first }!!
+        if (abs(near.first - cur.close) > 0.8 * atr) return null
+        val cluster = cand.filter { abs(it.first - near.first) <= 0.3 * atr }
+        val hasMid = cluster.any { it.second }
+        val hasMa = cluster.any { !it.second }
+        val kind = if (hasMid && hasMa) 3 else if (hasMid) 2 else 1
+        return BbmaPending(dir, kind, cluster.minOf { it.first }, cluster.maxOf { it.first }, e)
     }
 
     fun detect(): BbmaHit? {
