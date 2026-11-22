@@ -88,7 +88,8 @@ object ZoneAlerts {
         val title = z.kind + " · " + z.market.name + " (" + z.tf.label + ")"
         val text = "Prix " + fmt(price) + " dans la zone " + fmt(z.low) + " – " + fmt(z.high) +
             " · tendance " + (if (buy) "haussière" else "baissière") +
-            " → cherche un " + (if (buy) "ACHAT" else "VENTE")
+            " → cherche un " + (if (buy) "ACHAT" else "VENTE") +
+            (if (z.note.isNotEmpty()) " · " + z.note else "")
         val big = text + "\nAttends une bougie de confirmation avant d'entrer."
         val open = PendingIntent.getActivity(
             ctx, 0, Intent(ctx, MainActivity::class.java),
@@ -242,6 +243,14 @@ class ZoneService : Service() {
                             // Setups de la fiche (QMR, QMC, QMM, QM2P, SNRC1/2/3) : alerte quand un setup récent apparaît
                             try {
                                 SetupAlerts.scan(this@ZoneService, m, tf, raw)
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                // une erreur d'alerte ne doit pas bloquer le calcul des zones
+                            }
+                            // Re-entry BBMA en attente (MA5/10, Mid BB, ZZL) : alerte avant que le prix touche le niveau
+                            try {
+                                BbmaPendingAlerts.check(this@ZoneService, m, tf, raw)
                             } catch (e: CancellationException) {
                                 throw e
                             } catch (e: Exception) {
