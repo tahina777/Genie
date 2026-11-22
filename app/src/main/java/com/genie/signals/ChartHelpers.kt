@@ -106,11 +106,15 @@ internal fun bbmaTfText(tf: Tf, closed: List<Candle>): String {
     val b = BbmaCalc(closed)
     val mk = b.marks()
     val hit = b.detect()
+    val pd = b.pending()
     var dir: Direction? = null
     val st: String
     if (hit != null) {
         dir = hit.dir
         st = if (hit.setup.contains("MHV")) "MHV" else hit.sub.ifEmpty { "Re-entry" }
+    } else if (pd != null) {
+        dir = pd.dir
+        st = bbmaPendingName(pd.kind) + " en attente"
     } else if (mk.extreme != null) {
         dir = mk.extreme
         st = if (mk.extremeAgo == 0) "Extrême" else "Extrême (il y a " + mk.extremeAgo + ")"
