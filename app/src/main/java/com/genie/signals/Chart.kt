@@ -118,7 +118,8 @@ private class ChartData(
     val hyb: List<HybridSetup>,
     val base: List<BaseSetup>,
     val pat: List<PatSetup>,
-    val re: List<ReSetup>
+    val re: List<ReSetup>,
+    val rePend: BbmaPending?
 )
 
 private fun fmtPrice(v: Double, d: Int): String =
@@ -254,7 +255,8 @@ private fun buildData(c: List<Candle>, htf: List<Candle>?): ChartData {
         hyb = hyb,
         base = base,
         pat = pat,
-        re = try { buildReSetup(c, marks, atr) } catch (e: Exception) { emptyList() }
+        re = try { buildReSetup(c, marks, atr) } catch (e: Exception) { emptyList() },
+        rePend = try { BbmaCalc(c.dropLast(1)).pending() } catch (e: Exception) { null }
     )
 }
 
@@ -1211,10 +1213,27 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                     setupLines(if (rs.idx < start) 0f else x(rs.idx), rs.entry, rs.sl, rs.tp1, rs.tp2)
                     setupTag(
                         (if (rs.kind == 'Z') "ZZL" else if (rs.kind == 'N') "Re-entry MA" else "Re-entry Mid") +
-                            (if (rs.buy) " achat" else " vente"),
+                            (if (rs.buy) " achat" else " vente") + " · touché",
                         rcol,
                         xr0 + 4f,
                         if (rs.buy) y(rs.zoneLow) + 3f else rTop - 16f
+                    )
+                }
+
+                // Re-entry en attente : bande du niveau vers lequel le prix revient (pas encore touché)
+                val rpd = d.rePend
+                if (rpd != null && ((rpd.kind == 1 && showRma) || (rpd.kind == 2 && showR) || (rpd.kind == 3 && showZzl))) {
+                    val pcol = if (rpd.dir == Direction.BUY) green else red
+                    val xp0 = x(max(start, end - 12))
+                    val pTop = y(rpd.high)
+                    val pH = max(y(rpd.low) - pTop, 3f)
+                    drawRect(pcol.copy(alpha = 0.15f), topLeft = Offset(xp0, pTop), size = Size(plotW - xp0, pH))
+                    drawRect(pcol, topLeft = Offset(xp0, pTop), size = Size(plotW - xp0, pH), style = Stroke(width = 2f))
+                    setupTag(
+                        bbmaPendingName(rpd.kind) + (if (rpd.dir == Direction.BUY) " achat" else " vente") + " en attente",
+                        pcol,
+                        xp0 + 4f,
+                        if (rpd.dir == Direction.BUY) y(rpd.low) + 3f else pTop - 16f
                     )
                 }
 
