@@ -85,6 +85,22 @@ object SmcCombos {
         return false
     }
 
+    /** Texte d'état SMC d'un timeframe pour le graphique : zone testée, dernière cassure (10 bougies), sweep (6 bougies). */
+    fun tfText(tf: Tf, closed: List<Candle>): String {
+        if (closed.size < 60) return tf.label + " : \u2014"
+        val parts = ArrayList<String>()
+        val n = closed.size
+        val br = breaks(closed).lastOrNull { it.idx >= n - 10 }
+        if (br != null) {
+            parts.add(br.kind + (if (br.dir == Direction.BUY) " \u25b2" else " \u25bc") + " (il y a " + (n - 1 - br.idx) + ")")
+        }
+        if (swept(closed, Direction.BUY, 6)) parts.add("sweep \u25b2")
+        if (swept(closed, Direction.SELL, 6)) parts.add("sweep \u25bc")
+        val z = SmcCalc(closed).detect()
+        if (z != null) parts.add("zone " + z.zoneType + (if (z.dir == Direction.BUY) " \u25b2" else " \u25bc"))
+        return tf.label + " : " + (if (parts.isEmpty()) "\u2014" else parts.joinToString(" + "))
+    }
+
     /** `closed` : bougies terminées de chaque timeframe de la série, du plus grand au plus petit. */
     fun match(closed: List<List<Candle>>, triple: List<Tf>): SmcMatch? {
         if (closed.size != 3 || closed.any { it.size < 60 }) return null
