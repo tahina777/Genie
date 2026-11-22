@@ -119,7 +119,8 @@ private class ChartData(
     val base: List<BaseSetup>,
     val pat: List<PatSetup>,
     val re: List<ReSetup>,
-    val rePend: BbmaPending?
+    val rePend: BbmaPending?,
+    val smcc: List<SmcConcept>
 )
 
 private fun fmtPrice(v: Double, d: Int): String =
@@ -256,7 +257,8 @@ private fun buildData(c: List<Candle>, htf: List<Candle>?): ChartData {
         base = base,
         pat = pat,
         re = try { buildReSetup(c, marks, atr) } catch (e: Exception) { emptyList() },
-        rePend = try { BbmaCalc(c.dropLast(1)).pending() } catch (e: Exception) { null }
+        rePend = try { BbmaCalc(c.dropLast(1)).pending() } catch (e: Exception) { null },
+        smcc = try { SmcConcepts.detect(c) } catch (e: Exception) { emptyList() }
     )
 }
 
@@ -308,6 +310,11 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
     var showBs2 by remember { mutableStateOf(false) }
     var showCk1 by remember { mutableStateOf(false) }
     var showCk2 by remember { mutableStateOf(false) }
+    var showFvg by remember { mutableStateOf(false) }
+    var showBpr by remember { mutableStateOf(false) }
+    var showIdm by remember { mutableStateOf(false) }
+    var showPoi by remember { mutableStateOf(false) }
+    var showCrt by remember { mutableStateOf(false) }
     var visible by remember { mutableStateOf(80) }
     var shift by remember { mutableStateOf(0f) }
     val tm = rememberTextMeasurer()
@@ -554,6 +561,17 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                 FilterChip(selected = showCk1, onClick = { showCk1 = !showCk1 }, label = { Text("CK1") })
                 FilterChip(selected = showCk2, onClick = { showCk2 = !showCk2 }, label = { Text("CK2") })
             }
+            // Rangée 6 : concepts SMC
+            Row(
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                FilterChip(selected = showFvg, onClick = { showFvg = !showFvg }, label = { Text("FVG") })
+                FilterChip(selected = showBpr, onClick = { showBpr = !showBpr }, label = { Text("BPR") })
+                FilterChip(selected = showIdm, onClick = { showIdm = !showIdm }, label = { Text("Inducement") })
+                FilterChip(selected = showPoi, onClick = { showPoi = !showPoi }, label = { Text("POI") })
+                FilterChip(selected = showCrt, onClick = { showCrt = !showCrt }, label = { Text("CRT") })
+            }
 
             // Entrées affichées : proches (2 ATR au plus) sauf si « Lointaines » est actif
             val shownEntries: List<EntryLevel> =
@@ -582,6 +600,10 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                 (showBs1 && pt.type == PatType.BS1) || (showBs2 && pt.type == PatType.BS2) ||
                     (showCk1 && pt.type == PatType.CK1) || (showCk2 && pt.type == PatType.CK2)
             }.take(4)
+            val smcShown: List<SmcConcept> = d.smcc.filter { sc ->
+                (sc.kind == "FVG" && showFvg) || (sc.kind == "BPR" && showBpr) || (sc.kind == "IDM" && showIdm) ||
+                    (sc.kind == "POI" && showPoi) || (sc.kind == "CRT" && showCrt)
+            }
             val reShown: List<ReSetup> = d.re.filter { rs ->
                 (rs.kind == 'N' && showRma) || (rs.kind == 'R' && showR) || (rs.kind == 'Z' && showZzl)
             }
@@ -1218,6 +1240,17 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                         xr0 + 4f,
                         if (rs.buy) y(rs.zoneLow) + 3f else rTop - 16f
                     )
+                }
+
+                // Concepts SMC : FVG, BPR, Inducement, POI, CRT (zone ou ligne jusqu'au bord droit)
+                for (sc in smcShown) {
+                    val scol = if (sc.buy) green else red
+                    val xs = x(max(start, min(sc.fromIdx, end - 1)))
+                    val sTop = y(sc.high)
+                    val sH = max(y(sc.low) - sTop, 2f)
+                    drawRect(scol.copy(alpha = 0.14f), topLeft = Offset(xs, sTop), size = Size(plotW - xs, sH))
+                    drawRect(scol.copy(alpha = 0.7f), topLeft = Offset(xs, sTop), size = Size(plotW - xs, sH), style = Stroke(width = 1.5f))
+                    setupTag(sc.label, scol, xs + 4f, if (sc.buy) sTop + sH + 2f else sTop - 16f)
                 }
 
                 // Re-entry en attente : bande du niveau vers lequel le prix revient (pas encore touché)
