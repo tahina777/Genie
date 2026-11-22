@@ -176,6 +176,30 @@ class ScanWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             }
         }
 
+        // Combos SMC : zone sur le grand timeframe, sweep ou CHoCH au milieu, BOS sur le petit
+        for (triple in SmcCombos.TRIPLES) {
+            val name = "smc_" + triple.joinToString("") { it.label }
+            if (forced != null) {
+                if (triple.last().label !in forced) continue
+            } else {
+                val last = prefs.getLong(name, 0L)
+                if (now - last < comboEvery()) continue
+            }
+            try {
+                val hits = SmcCombos.scan(ALL_MARKETS, triple)
+                val fresh = Journal.add(ctx, hits)
+                for (s in fresh) {
+                    val key = "C|" + s.market.code + "|" + s.setup + "|" + s.dir + "|" + s.time
+                    if (seen.add(key)) Alerts.notify(ctx, s)
+                }
+                prefs.edit().putLong(name, now).apply()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // on réessaiera au prochain passage
+            }
+        }
+
         prefs.edit().putStringSet("seen", seen.toList().takeLast(300).toSet()).apply()
         try {
             Journal.refresh(ctx)
