@@ -49,6 +49,7 @@ object Alerts {
     }
 
     fun notify(ctx: Context, s: Signal) {
+        if (!StructureFilter.allows(ctx, s.market, s.dir)) return
         if (Build.VERSION.SDK_INT >= 33 &&
             ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS)
             != PackageManager.PERMISSION_GRANTED
