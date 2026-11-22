@@ -29,6 +29,7 @@ object BbmaPendingAlerts {
         if (now - last.time > tf.seconds * 4L) return
         val b = BbmaCalc(c)
         val p = b.pending() ?: return
+        if (!StructureFilter.allows(ctx, m, p.dir)) return
         val prefs = ctx.getSharedPreferences("genie", Context.MODE_PRIVATE)
         val key = "bp_" + m.code + "|" + tf.label
         val stamp = c[p.extremeIdx].time.toString() + ":" + p.kind + ":" + p.dir.name
