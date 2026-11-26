@@ -21,7 +21,10 @@ import kotlin.math.abs
  */
 object SetupAlerts {
 
-    private class Item(
+    /** Derniers setups récents par marché et timeframe, lus ensuite par SetupConfirmAlerts. */
+    internal val recent = java.util.concurrent.ConcurrentHashMap<String, List<Item>>()
+
+    internal class Item(
         val kind: String,
         val dir: QmDirection,
         val breakTime: Long,
@@ -104,6 +107,8 @@ object SetupAlerts {
                 )
             )
         }
+
+        recent[m.code + "|" + tf.label] = items
 
         val prefs = ctx.getSharedPreferences("genie", Context.MODE_PRIVATE)
         var sent = 0
