@@ -249,6 +249,14 @@ class ZoneService : Service() {
                             } catch (e: Exception) {
                                 // une erreur d'alerte ne doit pas bloquer le calcul des zones
                             }
+                            // Confirmation validée : englobante du timeframe supérieur sur la zone d'un setup
+                            try {
+                                SetupConfirmAlerts.check(this@ZoneService, m, tf)
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                // une erreur d'alerte ne doit pas bloquer le calcul des zones
+                            }
                             // Re-entry BBMA en attente (MA5/10, Mid BB, ZZL) : alerte avant que le prix touche le niveau
                             try {
                                 BbmaPendingAlerts.check(this@ZoneService, m, tf, raw)
