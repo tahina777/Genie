@@ -311,6 +311,8 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
     var showCk1 by remember { mutableStateOf(false) }
     var showCk2 by remember { mutableStateOf(false) }
     var showFvg by remember { mutableStateOf(false) }
+    var chipTab by remember { mutableStateOf(0) }
+    var showInfo by remember { mutableStateOf(false) }
     var showBpr by remember { mutableStateOf(false) }
     var showIdm by remember { mutableStateOf(false) }
     var showPoi by remember { mutableStateOf(false) }
@@ -469,7 +471,7 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                 }
             }
             val al = MarketStructure.alignment(structs)
-            Text(
+            if (showInfo) Text(
                 (if (al > 0) "Structure alignée haussière sur D1, H4 et H1"
                 else if (al < 0) "Structure alignée baissière sur D1, H4 et H1"
                 else "Structure non alignée") +
@@ -480,7 +482,7 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
         }
 
         if (bbmaTfs.isNotEmpty()) {
-            Text(
+            if (showInfo) Text(
                 "BBMA · " + bbmaTfs.joinToString(" · "),
                 fontSize = 11.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -490,7 +492,7 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
             }
         }
         if (smcTfs.isNotEmpty()) {
-            Text(
+            if (showInfo) Text(
                 "SMC \u00b7 " + smcTfs.joinToString(" \u00b7 "),
                 fontSize = 11.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -509,8 +511,23 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                 LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
             }
         } else {
-            // Rangée 1 : entrées, indicateurs, liquidité
+            // Onglets : un seul groupe de boutons à la fois (touche à nouveau l'onglet pour le fermer)
             Row(
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                FilterChip(selected = showInfo, onClick = { showInfo = !showInfo }, label = { Text("Infos") })
+                val tabNames = listOf("Base", "Zones", "BBMA", "Patterns", "Setups", "SMC")
+                for ((k, nm) in tabNames.withIndex()) {
+                    FilterChip(
+                        selected = chipTab == k,
+                        onClick = { chipTab = if (chipTab == k) -1 else k },
+                        label = { Text(nm) }
+                    )
+                }
+            }
+            // Rangée 1 : entrées, indicateurs, liquidité
+            if (chipTab == 0) Row(
                 modifier = Modifier.horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
@@ -522,7 +539,7 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                 FilterChip(selected = showLiq, onClick = { showLiq = !showLiq }, label = { Text("Liquidité") })
             }
             // Rangée 2 : zones, supports/résistances, profil
-            Row(
+            if (chipTab == 1) Row(
                 modifier = Modifier.horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
@@ -546,7 +563,7 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                 }
             }
             // Rangée 3 : repères BBMA
-            Row(
+            if (chipTab == 2) Row(
                 modifier = Modifier.horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
@@ -559,7 +576,7 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                 FilterChip(selected = showCsa, onClick = { showCsa = !showCsa }, label = { Text("CSA") })
             }
             // Rangée 4 : patterns
-            Row(
+            if (chipTab == 3) Row(
                 modifier = Modifier.horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
@@ -573,7 +590,7 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                 FilterChip(selected = showSw, onClick = { showSw = !showSw }, label = { Text("HH/HL/LH/LL") })
             }
             // Rangée 5 : setups de la fiche (QM et SNRC)
-            Row(
+            if (chipTab == 4) Row(
                 modifier = Modifier.horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
@@ -596,7 +613,7 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                 FilterChip(selected = showCk2, onClick = { showCk2 = !showCk2 }, label = { Text("CK2") })
             }
             // Rangée 6 : concepts SMC
-            Row(
+            if (chipTab == 5) Row(
                 modifier = Modifier.horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
