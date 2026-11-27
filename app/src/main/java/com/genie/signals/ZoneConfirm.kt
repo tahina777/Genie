@@ -56,6 +56,7 @@ object ZoneConfirm {
             cur.close < cur.open && cur.open >= prev.close && cur.close <= prev.open
         val hammer = range >= 0.5 * atr && down && lower >= 2 * body && lower >= 0.6 * range
         val shooting = range >= 0.5 * atr && up && upper >= 2 * body && upper >= 0.6 * range
+        val doji = range >= 0.5 * atr && body <= 0.1 * range
 
         for (z in zones) {
             // la bougie doit avoir touché la zone, et la zone ne doit pas avoir été traversée en clôture
@@ -64,10 +65,12 @@ object ZoneConfirm {
                 if (cur.close < z.low) continue
                 if (bullEng) return Hit(z, "Engulfing haussier", cur)
                 if (hammer) return Hit(z, "Pin bar haussière (marteau)", cur)
+                if (doji) return Hit(z, "Doji", cur)
             } else {
                 if (cur.close > z.high) continue
                 if (bearEng) return Hit(z, "Engulfing baissier", cur)
                 if (shooting) return Hit(z, "Pin bar baissière (étoile filante)", cur)
+                if (doji) return Hit(z, "Doji", cur)
             }
         }
         return null
