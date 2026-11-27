@@ -100,6 +100,9 @@ object Combos {
         return ComboMatch(code, dir, list)
     }
 
+    /** Combos dont la dernière bougie du plus petit timeframe est une confirmation (englobante, marteau, doji) : signal + nom. */
+    val confirmed = java.util.concurrent.ConcurrentHashMap<String, Pair<Signal, String>>()
+
     private suspend fun check(m: Market, triple: List<Tf>): Signal? {
         val closed = ArrayList<List<Candle>>()
         var forming: Candle? = null
@@ -122,7 +125,18 @@ object Combos {
         val sig = build(m, small, c, triple, mt) ?: return null
         // Signal périmé : TP1 ou SL déjà touché, ou entrée dépassée
         val f = forming
-        return if (f != null && Fresh.stale(sig, f)) null else sig
+        if (f != null && Fresh.stale(sig, f)) {
+            confirmed.remove(m.code + "|" + small.label)
+            return null
+        }
+        // Confirmation validée sur le plus petit timeframe : englobante, marteau / étoile filante ou doji
+        val ck = m.code + "|" + small.label
+        val atrS = Ind.atr(c)
+        val conf = if (atrS > 0.0 && c.size >= 3) {
+            SetupConfirmAlerts.confirmation(c[c.size - 2], c[c.size - 1], sig.dir == Direction.BUY, atrS)
+        } else null
+        if (conf != null) confirmed[ck] = Pair(sig, conf) else confirmed.remove(ck)
+        return sig
     }
 
     fun build(m: Market, small: Tf, c: List<Candle>, triple: List<Tf>, mt: ComboMatch): Signal? {
