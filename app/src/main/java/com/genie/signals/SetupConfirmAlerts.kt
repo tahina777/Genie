@@ -38,7 +38,7 @@ object SetupConfirmAlerts {
         }
 
     /** Nom de la confirmation formée par `cur` (englobante, marteau / étoile filante, doji) ou null. */
-    private fun confirmation(prev: Candle, cur: Candle, buy: Boolean, atr: Double): String? {
+    internal fun confirmation(prev: Candle, cur: Candle, buy: Boolean, atr: Double): String? {
         val body = kotlin.math.abs(cur.close - cur.open)
         val range = cur.high - cur.low
         if (range < 0.5 * atr) return null
