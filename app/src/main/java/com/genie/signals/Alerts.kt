@@ -65,7 +65,8 @@ object Alerts {
         val sens = if (s.dir == Direction.BUY) "ACHAT" else "VENTE"
         val combo = s.setup.startsWith("Combo ")
         val title = if (combo) {
-            s.setup.removePrefix("Combo ").take(3) + " " + sens + " " + s.market.name
+            (if (s.setup.contains(" confirmé")) "Confirmé · " else "") +
+                s.setup.removePrefix("Combo ").take(3) + " " + sens + " " + s.market.name
         } else {
             sens + " " + s.market.name + " (" + s.tf.label + ")"
         }
@@ -167,6 +168,20 @@ class ScanWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
                 for (s in fresh) {
                     val key = "C|" + s.market.code + "|" + s.setup + "|" + s.dir + "|" + s.time
                     if (seen.add(key)) Alerts.notify(ctx, s)
+                }
+                // Combo confirmé : la dernière bougie du plus petit timeframe valide englobante, marteau ou doji
+                for (s in hits) {
+                    val pr = Combos.confirmed[s.market.code + "|" + triple.last().label] ?: continue
+                    if (pr.first.time != s.time || pr.first.dir != s.dir) continue
+                    val ckey = "CC|" + s.market.code + "|" + s.setup + "|" + s.dir + "|" + s.time
+                    if (!seen.add(ckey)) continue
+                    Alerts.notify(
+                        ctx,
+                        Signal(
+                            s.market, s.tf, s.dir, s.setup + " confirmé", s.entry, s.sl, s.tp1, s.tp2, s.score,
+                            listOf("Confirmation " + triple.last().label + " : " + pr.second) + s.reasons, s.time
+                        )
+                    )
                 }
                 prefs.edit().putLong(name, now).apply()
             } catch (e: CancellationException) {
