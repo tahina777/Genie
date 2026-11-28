@@ -143,6 +143,7 @@ class ZoneService : Service() {
             started = true
             scope.launch { refreshLoop() }
             scope.launch { streamLoop() }
+            scope.launch { lowStructureLoop() }
         }
         return START_STICKY
     }
@@ -195,6 +196,23 @@ class ZoneService : Service() {
     }
 
     // ---------- zones ----------
+
+    /** Structure H1 · M15 · M5 : vérifiée toutes les 5 minutes (juste après la clôture de chaque bougie M5). */
+    private suspend fun lowStructureLoop() {
+        delay(20_000L)
+        while (true) {
+            try {
+                StructureLowAlerts.scan(this@ZoneService, ALL_MARKETS)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // nouvel essai au prochain passage
+            }
+            val now = System.currentTimeMillis()
+            val next = (now / 300_000L + 1L) * 300_000L + 15_000L
+            delay(max(1_000L, next - now))
+        }
+    }
 
     private suspend fun refreshLoop() {
         while (true) {
