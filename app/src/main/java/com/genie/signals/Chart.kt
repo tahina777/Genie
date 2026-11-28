@@ -264,6 +264,10 @@ private fun buildData(c: List<Candle>, htf: List<Candle>?): ChartData {
 
 @Composable
 fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
+    // Timeframe affiché : celui du signal, ou celui choisi avec les boutons D1 à M5 (sans quitter le graphique)
+    var tfSel by remember(spec) { mutableStateOf<Tf?>(null) }
+    val curSecs = tfSel?.seconds ?: spec.tfSeconds
+    val curLabel = tfSel?.label ?: spec.tfLabel
     var data by remember(spec) { mutableStateOf<ChartData?>(null) }
     var error by remember(spec) { mutableStateOf<String?>(null) }
     var showBb by remember { mutableStateOf(true) }
@@ -399,13 +403,15 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
         }
     }
 
-    LaunchedEffect(spec) {
+    LaunchedEffect(spec, tfSel) {
+        data = null
+        error = null
         try {
-            val raw = Deriv.candles(spec.code, spec.tfSeconds, 300)
+            val raw = Deriv.candles(spec.code, curSecs, 300)
             if (raw.size < 60) {
                 error = "Pas assez de bougies pour dessiner le graphique."
             } else {
-                val hs = Htf.seconds(spec.tfSeconds)
+                val hs = Htf.seconds(curSecs)
                 val htf = if (hs == null) null else try {
                     Deriv.candles(spec.code, hs, 300)
                 } catch (e: CancellationException) {
@@ -445,7 +451,7 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             OutlinedButton(onClick = onBack) { Text("← Retour") }
             Text(
-                spec.name + " · " + spec.tfLabel,
+                spec.name + " · " + curLabel,
                 fontWeight = FontWeight.Bold,
                 fontSize = 16.sp,
                 modifier = Modifier
@@ -457,6 +463,23 @@ fun ChartScreen(spec: ChartSpec, onBack: () -> Unit) {
                     if (buy) "ACHAT" else "VENTE",
                     color = sideColor,
                     fontWeight = FontWeight.Bold
+                )
+            }
+        }
+        Row(
+            modifier = Modifier.horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            for (t in listOf(Tf.D1, Tf.H4, Tf.H1, Tf.M15, Tf.M5)) {
+                FilterChip(
+                    selected = curSecs == t.seconds,
+                    onClick = {
+                        if (curSecs != t.seconds) {
+                            tfSel = t
+                            shift = 0f
+                        }
+                    },
+                    label = { Text(t.label) }
                 )
             }
         }
