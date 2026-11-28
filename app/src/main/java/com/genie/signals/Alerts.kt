@@ -215,22 +215,6 @@ class ScanWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             }
         }
 
-        // Structure H1 · M15 · M5 alignée
-        run {
-            val name = "stl_scan"
-            val ok = if (forced != null) ("M5" in forced || "M15" in forced) else (now - prefs.getLong(name, 0L) >= comboEvery())
-            if (ok) {
-                try {
-                    StructureLowAlerts.scan(ctx, ALL_MARKETS)
-                    prefs.edit().putLong(name, now).apply()
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    // on réessaiera au prochain passage
-                }
-            }
-        }
-
         prefs.edit().putStringSet("seen", seen.toList().takeLast(300).toSet()).apply()
         try {
             Journal.refresh(ctx)
